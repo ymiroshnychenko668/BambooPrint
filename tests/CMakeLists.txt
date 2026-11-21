@@ -28,20 +28,20 @@ endif()
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_executable(native_object_witness_test native_object_witness_test.cpp)
-    target_include_directories(native_object_witness_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
-    target_compile_options(native_object_witness_test PRIVATE -UNDEBUG)
-    target_link_libraries(native_object_witness_test PRIVATE libslic3r)
-    add_test(NAME native_object_witness_test COMMAND native_object_witness_test)
-    add_executable(native_emission_map_test native_emission_map_test.cpp)
-    target_include_directories(native_emission_map_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
-    target_compile_options(native_emission_map_test PRIVATE -UNDEBUG)
-    target_link_libraries(native_emission_map_test PRIVATE libslic3r)
-    add_test(NAME native_emission_map_test COMMAND native_emission_map_test)
-    add_executable(native_processor_export_callbacks_test native_processor_export_callbacks_test.cpp)
-    target_include_directories(native_processor_export_callbacks_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
-    target_link_libraries(native_processor_export_callbacks_test PRIVATE libslic3r)
-    add_test(NAME native_processor_export_callbacks_test COMMAND native_processor_export_callbacks_test)
+    # The desktop executable supplies these implementations for libslic3r.
+    add_library(native_core_test_support OBJECT
+        fff_print/native_nanosvg.cpp
+        ${PROJECT_SOURCE_DIR}/src/slic3r/Utils/Http.cpp
+        ${PROJECT_SOURCE_DIR}/src/slic3r/Utils/BBLUtil.cpp
+    )
+    target_link_libraries(native_core_test_support PUBLIC libslic3r libcurl OpenSSL::SSL OpenSSL::Crypto)
+    foreach(test_name IN ITEMS native_object_witness_test native_emission_map_test native_processor_export_callbacks_test)
+        add_executable(${test_name} ${test_name}.cpp)
+        target_include_directories(${test_name} PRIVATE ${PROJECT_SOURCE_DIR}/src)
+        target_compile_options(${test_name} PRIVATE -UNDEBUG)
+        target_link_libraries(${test_name} PRIVATE native_core_test_support)
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
 endif()
 
 add_subdirectory(libnest2d)
@@ -53,3 +53,14 @@ add_subdirectory(fila_manager)
 add_subdirectory(filament_group)
 add_subdirectory(cpp17 EXCLUDE_FROM_ALL)    # does not have to be built all the time
 # add_subdirectory(example)
+
+if(TARGET native_core_test_support)
+    # These standalone targets also link libslic3r without its desktop executable.
+    foreach(target IN ITEMS
+        libnest2d_tests libslic3r_tests fff_print_tests sla_print_tests
+        fila_manager_tests filament_group_tests fg_test_data_generator
+        support_material_on_wipe_tower_tests periodic_modifier_tests
+    )
+        target_link_libraries(${target} native_core_test_support)
+    endforeach()
+endif()

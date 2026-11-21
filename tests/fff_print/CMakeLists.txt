@@ -31,10 +31,9 @@ endif()
 add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})
 
 # EXP-11 regressions: the loop self-intersection check of FillFloatingConcentric and the default value of
-# PlateBBoxData::first_layer_time. A separate executable because fff_print_tests above does not compile at this
-# revision (test_gcodewriter.cpp still calls the removed GCodeWriter::set_extruder(int) and lift()). The objects of
-# libslic3r that the test pulls in reference Http, BBL_Encrypt and nanosvg, which only the GUI target compiles, so
-# their sources are built here; native_nanosvg.cpp holds the nanosvg implementation.
+# PlateBBoxData::first_layer_time. The standalone target runs these regressions independently.
+# Its libslic3r objects reference Http, BBL_Encrypt and nanosvg, normally supplied by the GUI.
+# The target supplies those sources, with the nanosvg implementation in native_nanosvg.cpp.
 # Build: -DSLIC3R_BUILD_TESTS=ON, then cmake --build <build dir> --target floating_determinism_tests
 add_executable(floating_determinism_tests
     fff_print_tests.cpp
