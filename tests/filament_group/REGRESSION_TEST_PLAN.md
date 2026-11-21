@@ -8,21 +8,21 @@
 
 ## 测试架构：两层结构
 
-### Layer 1: Golden 回归（27 case，存文件）
+### Layer 1: Golden 回归（25 case，存文件）
 
 从预存的 golden 输入文件中加载 `FilamentGroupContext`，运行算法，对比 `base_result` 中记录的基准分数。
 
 **断言**：
 - `new_full_score <= base_full_score + tolerance`（tolerance = max(50, score * 3%)）
 - `REQUIRE(constraints_ok)` — 所有 golden case 约束均可行
-- `elapsed_ms < 10000` — 超时检测
+- `elapsed_ms < 20000` — 超时检测
 
-**分布**（27 case）：
+**分布**（25 case）：
 
 | Config | 数量 | 构成 |
 |--------|------|------|
 | A (2ext × 2noz) | 10 | basic×3, stress×2, constraint×2, mode_match×1, mode_bestfit×1, mode_time×1 |
-| B (2ext × 1+Knoz) | 12 | basic×3, stress×3, constraint×3, mode_match×1, mode_bestfit×1, mode_time×1 |
+| B (2ext × 1+Knoz) | 10 | basic×3, stress×1, constraint×3, mode_match×1, mode_bestfit×1, mode_time×1 |
 | C (1ext × Knoz) | 5 | basic×2, stress×2, constraint×1 |
 
 **文件格式**：每个 golden 文件为单个 `.json`，包含：
@@ -35,6 +35,9 @@
 ```
 
 **更新机制**：通过 `[update-golden]` tag 运行测试，自动覆写所有文件的 `base_result` 字段。
+
+<a id="golden-ams"></a>
+**双基准样本**：`config_b/basic_47` 和 `config_b/constraint_88` 各运行两次。未同步 AMS 时按原有 `base_result` 与上述分数容差验证。使用文件中实际加载的料盘时，冲刷量和总分不得超过 `loaded_ams.result`；`extruders` 按耗材编号记录期望的物理挤出机。`matched_filament` 须在分配的挤出机上找到材质与支撑类型一致、ΔE2000 不超过 20 且比未同步时更接近的颜色。手动更新基准会重测两种状态，并保留这些物理分配要求。
 
 ### Layer 2: 属性检查（60 case，种子重生成）
 

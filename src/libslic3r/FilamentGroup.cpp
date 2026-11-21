@@ -1093,10 +1093,17 @@ namespace Slic3r
         for (auto f : used_filaments)
             used_filament_list.emplace_back(ctx.model_info.filament_info[f]);
 
+        const auto& group_sizes = ctx.machine_info.max_group_size;
+        const auto& support_preferences = ctx.machine_info.prefer_non_model_filament;
+        const size_t extruder_count = std::max({size_t(2), group_sizes.size(), ctx.machine_info.machine_filament_info.size(),
+                                               support_preferences.size()});
         std::vector<MachineFilamentInfo> machine_filament_list;
         std::map<MachineFilamentInfo, std::set<int>> machine_filament_set;
         for (size_t eid = 0; eid < ctx.machine_info.machine_filament_info.size();++eid) {
             for (auto& filament : ctx.machine_info.machine_filament_info[eid]) {
+                // A sparse catalog may still refer to the second physical extruder.
+                if (filament.extruder_id < 0 || size_t(filament.extruder_id) >= extruder_count)
+                    continue;
                 machine_filament_set[filament].insert(machine_filament_list.size());
                 machine_filament_list.emplace_back(filament);
             }
@@ -1132,7 +1139,27 @@ namespace Slic3r
         std::vector<int>r_nodes(machine_filament_list.size());
         std::iota(r_nodes.begin(), r_nodes.end(), 0);
         std::vector<int>machine_filament_capacity(machine_filament_list.size(),l_nodes.size());
-        std::vector<int>extruder_filament_count(2, 0);
+        std::vector<int> extruder_filament_count(extruder_count, 0);
+
+        const bool limit_capacity = std::accumulate(group_sizes.begin(), group_sizes.end(), int64_t{0}) >= static_cast<int64_t>(used_filaments.size())
+            && std::all_of(machine_filament_list.begin(), machine_filament_list.end(), [&](const auto& spool) {
+                return size_t(spool.extruder_id) < group_sizes.size();
+            });
+        std::vector<std::pair<std::set<int>, int>> extruder_slots;
+        if (limit_capacity) {
+            extruder_slots.resize(group_sizes.size());
+            for (size_t spool = 0; spool < machine_filament_list.size(); ++spool)
+                extruder_slots[machine_filament_list[spool].extruder_id].first.insert(spool);
+        }
+
+        // Several machine spools may feed the same extruder. Limit their combined
+        // assignments and carry forward slots already used in earlier matching passes.
+        auto match = [&](const std::unordered_map<int, std::vector<int>>& unlink_limits) {
+            for (size_t ext = 0; ext < extruder_slots.size(); ++ext)
+                extruder_slots[ext].second = group_sizes[ext] - extruder_filament_count[ext];
+            return MinFlushFlowSolver(match_cost_matrix, l_nodes, r_nodes, {}, unlink_limits,
+                                      {}, machine_filament_capacity, extruder_slots).solve();
+        };
 
         auto is_extruder_filament_compatible = [&unprintable_limit_indices](int filament_idx, int extruder_id) {
             auto iter = unprintable_limit_indices.find(filament_idx);
@@ -1198,9 +1225,12 @@ namespace Slic3r
                 for (auto machine_filament : optional_filaments) {
                     int new_extruder_id = machine_filament_list[machine_filament].extruder_id;
 
+                    if (!extruder_slots.empty() && extruder_filament_count[new_extruder_id] >= group_sizes[new_extruder_id])
+                        continue;
+
                     // 计算新分配的偏好得分
                     int preference_score = 0;
-                    bool new_extruder_prefer_support = ctx.machine_info.prefer_non_model_filament[new_extruder_id];
+                    bool new_extruder_prefer_support = size_t(new_extruder_id) < support_preferences.size() && support_preferences[new_extruder_id];
 
                     // 如果是支撑材料且分配给了偏好支撑的喷嘴，给予奖励
                     if (is_support_filament && new_extruder_prefer_support) {
@@ -1219,7 +1249,7 @@ namespace Slic3r
 
                 // 第三阶段：匹配成本优先，成本相同时选择负载更均衡的方案。
                 int best_candidate = -1;
-                int best_gap = std::numeric_limits<int>::max();
+                int lowest_load = std::numeric_limits<int>::max();
                 float best_match_cost = std::numeric_limits<float>::max();
 
                 for (const auto& candidate : valid_candidates) {
@@ -1228,13 +1258,13 @@ namespace Slic3r
                     int score = candidate.second;
                     if (score == best_preference_score) {
                         int new_extruder_id = machine_filament_list[machine_filament].extruder_id;
-                        int new_gap = std::abs(extruder_filament_count[new_extruder_id] + 1 - extruder_filament_count[1 - new_extruder_id]);
+                        int load = extruder_filament_count[new_extruder_id];
                         float match_cost = match_cost_matrix[filament_idx][machine_filament];
 
                         // 优先选择匹配成本更低的候选，成本相同时选择负载更均衡的候选。
-                        if (match_cost < best_match_cost || (match_cost == best_match_cost && new_gap < best_gap)) {
+                        if (match_cost < best_match_cost || (match_cost == best_match_cost && load < lowest_load)) {
                             best_match_cost = match_cost;
-                            best_gap = new_gap;
+                            lowest_load = load;
                             best_candidate = machine_filament;
                         }
                     }
@@ -1259,21 +1289,45 @@ namespace Slic3r
             });
 
         {
-            MatchModeGroupSolver s(match_cost_matrix, l_nodes, r_nodes, machine_filament_capacity, unlink_limits_full);
-            ungrouped_filaments = optimize_map_to_machine_filament(s.solve(), l_nodes, r_nodes,group);
+            ungrouped_filaments = optimize_map_to_machine_filament(match(unlink_limits_full), l_nodes, r_nodes, group);
             if (ungrouped_filaments.empty())
                 return group;
         }
 
+        auto printable_spool = [&](int filament, int spool) {
+            return is_extruder_filament_compatible(filament, machine_filament_list[spool].extruder_id);
+        };
+
         // additionally remove type limits
         {
             l_nodes = ungrouped_filaments;
-            auto unlink_limits = build_unlink_limits(l_nodes, r_nodes, [&machine_filament_list, is_extruder_filament_compatible](int used_filament_idx, int machine_filament_idx) {
-                return is_extruder_filament_compatible(used_filament_idx, machine_filament_list[machine_filament_idx].extruder_id);
-                });
+            auto unlink_limits = build_unlink_limits(l_nodes, r_nodes, printable_spool);
 
-            MatchModeGroupSolver s(match_cost_matrix, l_nodes, r_nodes, machine_filament_capacity, unlink_limits);
-            ungrouped_filaments = optimize_map_to_machine_filament(s.solve(), l_nodes, r_nodes, group);
+            ungrouped_filaments = optimize_map_to_machine_filament(match(unlink_limits), l_nodes, r_nodes, group);
+            if (ungrouped_filaments.empty())
+                return group;
+        }
+
+        // A type match in the first pass may occupy the only legal extruder
+        // for a later filament. Reconsider all assignments before relaxing limits.
+        if (!extruder_slots.empty()) {
+            l_nodes.resize(used_filaments.size());
+            std::iota(l_nodes.begin(), l_nodes.end(), 0);
+            auto unlink_limits = build_unlink_limits(l_nodes, r_nodes, printable_spool);
+            auto previous_counts = extruder_filament_count;
+            std::fill(extruder_filament_count.begin(), extruder_filament_count.end(), 0);
+            auto assignment = match(unlink_limits);
+            if (std::find(assignment.begin(), assignment.end(), MaxFlowGraph::INVALID_ID) == assignment.end()) {
+                optimize_map_to_machine_filament(assignment, l_nodes, r_nodes, group);
+                return group;
+            }
+            // No capacity-feasible assignment exists. Keep printability and
+            // material preferences for the existing best-effort result.
+            extruder_slots.clear();
+            l_nodes = ungrouped_filaments;
+            unlink_limits = build_unlink_limits(l_nodes, r_nodes, printable_spool);
+            extruder_filament_count = std::move(previous_counts);
+            ungrouped_filaments = optimize_map_to_machine_filament(match(unlink_limits), l_nodes, r_nodes, group);
             if (ungrouped_filaments.empty())
                 return group;
         }

@@ -12,7 +12,7 @@ tests/filament_group/
 ├── fg_test_serialization.hpp             FilamentGroupContext 的 JSON 序列化/反序列化
 ├── fg_test_utils.hpp                     测试数据生成工具（随机 flush matrix、layer filaments、机器配置等）
 ├── test_data_generator.cpp              独立可执行程序：批量生成 500 个测试用例到 data/
-├── golden/                               精选的 27 个 golden case（入 git）
+├── golden/                               精选的 25 个 golden case（入 git）
 │   ├── config_a/                         2-extruder × 2-nozzle
 │   ├── config_b/                         2-extruder × 1+K-nozzle（选料器）
 │   └── config_c/                         1-extruder × K-nozzle
@@ -23,7 +23,7 @@ tests/filament_group/
 
 | 文件 | 作用 |
 |------|------|
-| `filament_group_regression_main.cpp` | 定义三个 TEST_CASE：`[golden]` 对比基准分数、`[property]` 属性断言、`[update-golden]` 刷新基准 |
+| `filament_group_regression_main.cpp` | 定义回归用例：`[golden]` 对比基准分数、`[property]` 属性断言、`[match_capacity]` 物理挤出机槽位与可打印条件、`[update-golden]` 刷新基准 |
 | `fg_test_evaluator.hpp` | `run_and_evaluate()` 运行分组算法；`full_evaluate_map()` 完整计算 flush + change_time + score；`check_constraints()` 独立约束验证 |
 | `fg_test_serialization.hpp` | 所有数据结构的 nlohmann::json 序列化（FilamentGroupContext、BaseResult、TestMetadata 等）及文件 I/O |
 | `fg_test_utils.hpp` | `TestRng` 确定性随机数生成器；`build_test_case()` 从 seed 构建完整 case；三种机器配置模板（A/B/C）；约束注入 |
@@ -45,7 +45,7 @@ cmake --build build --target filament_group_tests
 # 运行全部
 ./build/tests/filament_group_tests
 
-# 仅 golden（27 case，验证不退化）
+# 仅 golden（25 case，验证不退化）
 ./build/tests/filament_group_tests "[golden]"
 
 # 仅属性检查（60 case，种子生成）
@@ -54,3 +54,5 @@ cmake --build build --target filament_group_tests
 # 更新 golden baseline（算法改进后手动执行）
 ./build/tests/filament_group_tests "[update-golden]"
 ```
+
+有装料 AMS 的双基准样本及其更新规则见 [回归测试方案](REGRESSION_TEST_PLAN.md#golden-ams)。

@@ -3,9 +3,11 @@
 #include "fg_test_serialization.hpp"
 #include "fg_test_evaluator.hpp"
 #include "fg_test_utils.hpp"
+#include "libslic3r/FlushVolPredictor.hpp"
 
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -202,6 +204,50 @@ static std::vector<PropertySpec>& get_property_specs() {
 
 // ============ Layer 1: Golden Regression ============
 
+static FilamentGroupContext base_context(const TestCase& tc) {
+    auto ctx = tc.context;
+    if (tc.loaded_ams)
+        ctx.machine_info.machine_filament_info.clear();
+    return ctx;
+}
+
+static BaseResult measure_golden(const FilamentGroupContext& ctx, TestResult& result) {
+    result = run_and_evaluate(ctx);
+    auto eval = full_evaluate_map(ctx, result.filament_map);
+    return {eval.full_score, eval.flush_cost, result.constraints_ok};
+}
+
+static float nearest_compatible_slot(const FilamentGroupContext& ctx, unsigned int filament_id,
+                                     int extruder_id) {
+    const auto& filament = ctx.model_info.filament_info.at(filament_id);
+    float best = std::numeric_limits<float>::infinity();
+    for (const auto& slot : ctx.machine_info.machine_filament_info.at(extruder_id)) {
+        if (slot.type == filament.type && slot.is_support == filament.is_support) {
+            best = std::min(best, FlushPredict::calc_color_distance(
+                FlushPredict::RGBColor(filament.color.r, filament.color.g, filament.color.b),
+                FlushPredict::RGBColor(slot.color.r, slot.color.g, slot.color.b)));
+        }
+    }
+    return best;
+}
+
+static void check_ams_assignment(const TestCase& tc, const TestResult& base, const TestResult& loaded) {
+    const auto& expected = *tc.loaded_ams;
+    const auto& nozzles = tc.context.nozzle_info.nozzle_list;
+    std::vector<int> extruders;
+    for (int nozzle : loaded.filament_map)
+        extruders.push_back(nozzles.at(nozzle).extruder_id);
+    REQUIRE(extruders == expected.extruders);
+
+    const auto fil = expected.matched_filament;
+    const int previous_extruder = nozzles.at(base.filament_map.at(fil)).extruder_id;
+    const float before = nearest_compatible_slot(tc.context, fil, previous_extruder);
+    const float after = nearest_compatible_slot(tc.context, fil, extruders.at(fil));
+    CAPTURE(fil, before, after);
+    REQUIRE(after <= 20.0f);
+    REQUIRE(after < before);
+}
+
 TEST_CASE("FilamentGroup golden regression", "[filament_group][golden]") {
     auto files = get_golden_files();
     if (files.empty()) {
@@ -216,9 +262,8 @@ TEST_CASE("FilamentGroup golden regression", "[filament_group][golden]") {
         auto tc = load_test_case(file_path);
         REQUIRE(tc.base_result.has_value());
 
-        auto result = run_and_evaluate(tc.context);
-        auto eval = full_evaluate_map(tc.context, result.filament_map);
-
+        TestResult result;
+        auto eval = measure_golden(base_context(tc), result);
         auto& base = *tc.base_result;
 
         INFO("Case: " << tc.metadata.id);
@@ -232,6 +277,19 @@ TEST_CASE("FilamentGroup golden regression", "[filament_group][golden]") {
         REQUIRE(result.constraints_ok);
         REQUIRE(eval.full_score <= base.full_score + tolerance);
         REQUIRE(result.elapsed_ms < 20000.0);
+
+        if (tc.loaded_ams) {
+            REQUIRE(eval.flush_cost <= base.flush_cost);
+            TestResult loaded;
+            const auto measured = measure_golden(tc.context, loaded);
+            const auto& limit = tc.loaded_ams->result;
+            CAPTURE(measured.full_score, limit.full_score, measured.flush_cost, limit.flush_cost);
+            REQUIRE(loaded.constraints_ok);
+            REQUIRE(loaded.elapsed_ms < 20000.0);
+            REQUIRE(measured.full_score <= Approx(limit.full_score).epsilon(1e-10));
+            REQUIRE(measured.flush_cost <= limit.flush_cost);
+            check_ams_assignment(tc, result, loaded);
+        }
     }
 }
 
@@ -281,15 +339,15 @@ TEST_CASE("FilamentGroup update golden", "[filament_group][update-golden][.]") {
     int updated = 0;
     for (auto& file_path : files) {
         auto tc = load_test_case(file_path);
-        auto result = run_and_evaluate(tc.context);
-        auto eval = full_evaluate_map(tc.context, result.filament_map);
-
-        BaseResult base;
-        base.full_score = eval.full_score;
-        base.flush_cost = eval.flush_cost;
-        base.constraints_ok = result.constraints_ok;
-
+        TestResult result;
+        const auto base = measure_golden(base_context(tc), result);
         tc.base_result = base;
+        if (tc.loaded_ams) {
+            TestResult loaded;
+            tc.loaded_ams->result = measure_golden(tc.context, loaded);
+            REQUIRE(loaded.constraints_ok);
+            check_ams_assignment(tc, result, loaded);
+        }
         save_test_case(file_path, tc);
         updated++;
 
@@ -300,4 +358,41 @@ TEST_CASE("FilamentGroup update golden", "[filament_group][update-golden][.]") {
 
     std::cout << "\nUpdated " << updated << " golden files." << std::endl;
     REQUIRE(updated > 0);
+}
+
+TEST_CASE("Match mode respects physical extruder slots and printability", "[filament_group][match_capacity]") {
+    FilamentGroupContext ctx{};
+    TestRng rng(42);
+    build_config_a(ctx, 2, rng);
+    ctx.group_info.total_filament_num = 2;
+    ctx.group_info.mode = FGMode::MatchMode;
+    ctx.machine_info.max_group_size = {1, 1};
+    auto& spools = ctx.machine_info.machine_filament_info;
+    for (auto& bank : spools)
+        bank.resize(1);
+    ctx.model_info.layer_filaments = {{0, 1}};
+    ctx.model_info.filament_info = {spools[0][0], spools[1][0]};
+    ctx.model_info.filament_info[1].type = "PETG";
+
+    SECTION("A color match releases the only printable extruder for another material") {
+        ctx.model_info.unprintable_filaments[1].insert(1);
+        REQUIRE(FilamentGroup(ctx).calc_filament_group() == std::vector<int>({1, 0}));
+    }
+
+    SECTION("An impossible capacity keeps both materials on their only printable extruder") {
+        ctx.model_info.unprintable_filaments[1] = {0, 1};
+        REQUIRE(FilamentGroup(ctx).calc_filament_group() == std::vector<int>({0, 0}));
+    }
+
+    SECTION("A sparse catalog preserves the physical id and ignores invalid spools") {
+        auto valid = spools[1][0];
+        auto invalid = valid;
+        invalid.extruder_id = -1;
+        auto out_of_range = valid;
+        out_of_range.extruder_id = 9;
+        spools = {{invalid, valid, out_of_range}};
+        ctx.machine_info.max_group_size = {0, 2};
+        ctx.machine_info.prefer_non_model_filament.clear();
+        REQUIRE(FilamentGroup(ctx).calc_filament_group() == std::vector<int>({1, 1}));
+    }
 }

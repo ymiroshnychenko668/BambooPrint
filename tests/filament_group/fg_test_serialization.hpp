@@ -392,11 +392,19 @@ inline void from_json(const json& j, BaseResult& g) {
     j.at("constraints_ok").get_to(g.constraints_ok);
 }
 
+// For selected fixtures base_result describes the machine before AMS synchronization.
+struct LoadedAmsBaseline {
+    BaseResult result;
+    std::vector<int> extruders;
+    unsigned int matched_filament;
+};
+
 // ============ File I/O ============
 struct TestCase {
     TestMetadata metadata;
     FilamentGroupContext context;
     std::optional<BaseResult> base_result;
+    std::optional<LoadedAmsBaseline> loaded_ams;
 };
 
 inline TestCase load_test_case(const std::string& path) {
@@ -407,6 +415,12 @@ inline TestCase load_test_case(const std::string& path) {
     Slic3r::from_json(j.at("context"), tc.context);
     if (j.contains("base_result"))
         tc.base_result = j.at("base_result").get<BaseResult>();
+    if (j.contains("loaded_ams")) {
+        const auto& ams = j.at("loaded_ams");
+        tc.loaded_ams = LoadedAmsBaseline{ams.at("result").get<BaseResult>(),
+                                          ams.at("extruders").get<std::vector<int>>(),
+                                          ams.at("matched_filament").get<unsigned int>()};
+    }
     return tc;
 }
 
@@ -418,6 +432,11 @@ inline void save_test_case(const std::string& path, const TestCase& tc) {
     j["context"] = ctx_j;
     if (tc.base_result)
         j["base_result"] = *tc.base_result;
+    if (tc.loaded_ams) {
+        const auto& ams = *tc.loaded_ams;
+        j["loaded_ams"] = {{"result", ams.result}, {"extruders", ams.extruders},
+                           {"matched_filament", ams.matched_filament}};
+    }
     std::ofstream f(path);
     f << j.dump(-1);
 }
