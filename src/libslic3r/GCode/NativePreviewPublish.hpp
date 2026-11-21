@@ -3,7 +3,13 @@
 
 #include "NativePreview.hpp"
 
+#include <string_view>
+
 namespace Slic3r::NativePreview {
+bool valid_sha256(std::string_view value);
+// Emits the immutable capability declaration for the dedicated CLI probe.
+void write_capability(const std::string &path);
+
 // Trusted export hook: replaces processor-map publish and uses the same
 // finished collector and final result. execution_sha256 must come from
 // the authenticated execution, not from a request-controlled value.

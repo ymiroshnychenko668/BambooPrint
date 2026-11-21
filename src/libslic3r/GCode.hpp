@@ -16,6 +16,7 @@
 #include "GCode/WipeTower.hpp"
 #include "GCode/SeamPlacer.hpp"
 #include "GCode/GCodeProcessor.hpp"
+#include "GCode/NativeObjectWitness.hpp"
 #include "EdgeGrid.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "libslic3r/ObjectID.hpp"
@@ -202,6 +203,13 @@ public:
     // throws std::runtime_exception on error,
     // throws CanceledException through print->throw_if_canceled().
     void            do_export(Print* print, const char* path, GCodeProcessorResult* result = nullptr, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    void            do_export(Print* print, const char* path, GCodeProcessorResult* result,
+                              ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map);
+    void            do_export(Print* print, const char* path, GCodeProcessorResult* result,
+                              ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map);
+    void            do_export(Print* print, const char* path, GCodeProcessorResult* result,
+                              ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map,
+                              bool native_object_map, NativeObjectWitness::Options object_witness = {});
     void            export_layer_filaments(GCodeProcessorResult* result);
     //BBS: set offset for gcode writer
     void set_gcode_offset(double x, double y) { m_writer.set_xy_offset(x, y); m_processor.set_xy_offset(x, y);}
@@ -290,7 +298,10 @@ public:
 private:
     class GCodeOutputStream {
     public:
-        GCodeOutputStream(FILE *f, GCodeProcessor &processor) : f(f), m_processor(processor) {}
+        GCodeOutputStream(FILE *f, GCodeProcessor &processor, NativeEmissionMap::Collector* emission,
+                          NativeObjectWitness::Collector* witness)
+            : f(f), m_processor(processor), m_emission(emission), m_witness(witness) {}
+        NativeObjectWitness::Collector* witness() const { return m_witness; }
         ~GCodeOutputStream() { this->close(); }
 
         bool is_open() const { return f; }
@@ -305,7 +316,8 @@ private:
 
         // Write a string into a file.
         void write(const std::string& what) { this->write(what.c_str()); }
-        void write(const char* what);
+        void write(const char* what, uint64_t scope = 0);
+        void write_layer(const std::string& what, uint64_t& invocation, uint64_t local_layer);
 
         // Write a string into a file.
         // Add a newline, if the string does not end with a newline already.
@@ -318,6 +330,8 @@ private:
     private:
         FILE *f = nullptr;
         GCodeProcessor &m_processor;
+        NativeEmissionMap::Collector* m_emission;
+        NativeObjectWitness::Collector* m_witness;
         // errno captured at the first failed fwrite/fflush, 0 if none.
         int  m_write_errno = 0;
     };
@@ -383,7 +397,8 @@ private:
         // Otherwise print a single copy of a single object.
         const size_t                     single_object_idx = size_t(-1),
         // BBS
-        const bool                       prime_extruder = false);
+        const bool                       prime_extruder = false,
+        NativeObjectWitness::Collector* witness = nullptr);
     // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
     // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
     // and export G-code into file.
@@ -421,10 +436,10 @@ private:
     std::string     preamble();
     // BBS
     std::string     change_layer(coordf_t print_z);
-    std::string     extrude_entity(const ExtrusionEntity &entity, std::string description = "", double speed = -1.);
-    std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1.);
-    std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1.);
-    std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1.);
+    std::string     extrude_entity(const ExtrusionEntity &entity, std::string description = "", double speed = -1., NativeObjectWitness::Operation witness = {});
+    std::string     extrude_loop(ExtrusionLoop loop, std::string description, double speed = -1., NativeObjectWitness::Operation witness = {});
+    std::string     extrude_multi_path(ExtrusionMultiPath multipath, std::string description = "", double speed = -1., NativeObjectWitness::Operation witness = {});
+    std::string     extrude_path(ExtrusionPath path, std::string description = "", double speed = -1., NativeObjectWitness::Operation witness = {});
 
     //smooth speed function
     void            smooth_speed_discontinuity_area(ExtrusionPaths &paths);
@@ -503,8 +518,8 @@ private:
 		// For sequential print, the instance of the object to be printing has to be defined.
 		const size_t                     				 single_object_instance_idx);
 
-    std::string     extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region);
-    std::string     extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing);
+    std::string     extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, NativeObjectWitness::Operation witness = {});
+    std::string     extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing, NativeObjectWitness::Operation witness = {});
     std::string     extrude_support(const ExtrusionEntityCollection &support_fills);
 
     std::string travel_to(const Point &point, ExtrusionRole role, std::string comment, double z = DBL_MAX);
@@ -673,7 +688,8 @@ private:
     void update_layer_related_config(int layer_id);
 
     double calc_max_volumetric_speed(const double layer_height, const double line_width, const std::string co_str);
-    std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1, bool set_holes_and_compensation_speed = false, bool is_first_slope = false);
+    std::string _extrude(const ExtrusionPath &path, std::string description = "", double speed = -1, bool set_holes_and_compensation_speed = false, bool is_first_slope = false,
+                         NativeObjectWitness::Operation witness = {});
     ExtrusionPaths set_speed_transition(std::vector<ExtrusionPaths> &paths);
     void split_and_mapping_speed(double other_path_v, double final_v, ExtrusionPaths &this_path, double max_smooth_length, ExtrusionPaths &interpolated_paths, bool split_from_left = true);
     bool is_enable_overhang_speed();

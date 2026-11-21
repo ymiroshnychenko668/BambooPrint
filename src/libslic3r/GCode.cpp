@@ -5,6 +5,10 @@
 #include "ExtrusionEntity.hpp"
 #include "EdgeGrid.hpp"
 #include "Geometry/ConvexHull.hpp"
+#include "GCode/NativeProcessorMoveMap.hpp"
+#include "GCode/NativeEmissionMap.hpp"
+#include "GCode/NativeObjectMap.hpp"
+#include "GCode/NativePreviewPublish.hpp"
 #include "GCode/PrintExtents.hpp"
 #include "GCode/WipeTower.hpp"
 #include "ShortestPath.hpp"
@@ -1813,12 +1817,86 @@ BoundingBoxf GCode::first_layer_projection(const Print& print) const
 
 void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
+    this->do_export(print, path, result, std::move(thumbnail_cb), false);
+}
+
+void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* result,
+                      ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map)
+{
+    this->do_export(print, path, result, std::move(thumbnail_cb), native_processor_map, false);
+}
+
+void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* result,
+                      ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map)
+{
+    this->do_export(print, path, result, std::move(thumbnail_cb), native_processor_map, native_emission_map, false);
+}
+
+void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* result,
+                      ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map,
+                      bool native_object_map, NativeObjectWitness::Options object_witness)
+{
     PROFILE_CLEAR();
 
+    if ((object_witness.witness && !native_object_map) || (object_witness.writer && !object_witness.witness))
+        throw Slic3r::RuntimeError("NATIVE_OBJECT_WITNESS_INVALID_OPT_IN");
     // BBS
     m_curr_print = print;
 
     CNumericLocalesSetter locales_setter;
+
+    std::string preview_execution_sha256;
+    if (native_processor_map || native_emission_map || native_object_map) {
+        const std::string evidence = native_processor_map ? "NATIVE_PROCESSOR_MAP"
+            : native_emission_map ? "NATIVE_EMISSION_MAP" : "NATIVE_OBJECT_MAP";
+#ifndef __linux__
+        throw Slic3r::RuntimeError(evidence + "_UNSUPPORTED_PLATFORM");
+#endif
+        const PrintConfig& config = print->config();
+        if (print->is_step_done(psGCodeExport))
+            throw Slic3r::RuntimeError(evidence + "_UNSUPPORTED_CACHED_EXPORT");
+        if (config.print_sequence != PrintSequence::ByLayer)
+            throw Slic3r::RuntimeError(evidence + "_UNSUPPORTED_BY_OBJECT");
+        if (config.spiral_mode.value)
+            throw Slic3r::RuntimeError(evidence + "_UNSUPPORTED_SPIRAL");
+        if (config.z_direction_outwall_speed_continuous.value)
+            throw Slic3r::RuntimeError(evidence + "_UNSUPPORTED_Z_SMOOTHING");
+        if (!config.post_process.values.empty())
+            throw Slic3r::RuntimeError(evidence + "_UNSUPPORTED_EXTERNAL_POSTPROCESS");
+        if (native_processor_map &&
+            fs::symlink_status(std::string(path) + NativeProcessorMoveMap::sidecar_suffix).type() != fs::file_not_found)
+                throw Slic3r::RuntimeError("NATIVE_PROCESSOR_MAP_OUTPUT_UNAVAILABLE");
+        if (native_processor_map) {
+            if (const char* opt_in = boost::nowide::getenv("CORVUS_NATIVE_PREVIEW_MAP")) {
+                const char* execution = boost::nowide::getenv("CORVUS_NATIVE_EXECUTION_SHA256");
+                if (std::strcmp(opt_in, "1") != 0 || !execution || !NativePreview::valid_sha256(execution))
+                    throw Slic3r::RuntimeError("NATIVE_PREVIEW_INVALID_OPT_IN");
+                preview_execution_sha256 = execution;
+            }
+        }
+        if (native_emission_map) {
+            const std::string sidecar = std::string(path) + NativeEmissionMap::sidecar_suffix;
+            if (fs::symlink_status(sidecar).type() != fs::file_not_found
+                || fs::symlink_status(sidecar + ".pending").type() != fs::file_not_found)
+                throw Slic3r::RuntimeError("NATIVE_EMISSION_OUTPUT_UNAVAILABLE");
+        }
+        if (native_object_map) {
+            const std::string sidecar = std::string(path) + NativeObjectMap::sidecar_suffix;
+            if (fs::symlink_status(sidecar).type() != fs::file_not_found
+                || fs::symlink_status(sidecar + ".pending").type() != fs::file_not_found)
+                throw Slic3r::RuntimeError("NATIVE_OBJECT_MAP_OUTPUT_UNAVAILABLE");
+            if (object_witness.witness) {
+                for (const auto* suffix : {NativeObjectWitness::membership_suffix, NativeObjectWitness::audit_suffix,
+                                           NativeObjectWitness::operation_suffix, NativeObjectWitness::writer_suffix}) {
+                    if (suffix == NativeObjectWitness::writer_suffix && !object_witness.writer) continue;
+                    const std::string destination = std::string(path) + suffix;
+                    if (fs::symlink_status(destination).type() != fs::file_not_found
+                        || fs::symlink_status(destination + ".pending").type() != fs::file_not_found)
+                        throw Slic3r::RuntimeError("NATIVE_OBJECT_WITNESS_OUTPUT_UNAVAILABLE");
+                }
+            }
+        }
+    }
 
     // Does the file exist? If so, we hope that it is still valid.
     if (print->is_step_done(psGCodeExport) && boost::filesystem::exists(boost::filesystem::path(path)))
@@ -1861,8 +1939,23 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     std::string path_tmp(path);
     path_tmp += ".tmp";
 
-    m_processor.initialize(path_tmp);
-    GCodeOutputStream file(boost::nowide::fopen(path_tmp.c_str(), "wb"), m_processor);
+    const auto detach_provenance = [this](NativeProcessorProvenance::Collector* collector) noexcept {
+        m_processor.detach_export_provenance();
+        delete collector;
+    };
+    std::unique_ptr<NativeProcessorProvenance::Collector, decltype(detach_provenance)> provenance(
+        nullptr, detach_provenance);
+    const auto check_cancel = [print] { print->throw_if_canceled(); };
+    auto emission = native_emission_map ? std::make_unique<NativeEmissionMap::Collector>(check_cancel) : nullptr;
+    if (native_processor_map) {
+        provenance.reset(new NativeProcessorProvenance::Collector(
+            NativeProcessorProvenance::Limits{}, check_cancel));
+        m_processor.initialize_for_export(path_tmp, *provenance);
+    } else {
+        m_processor.initialize(path_tmp);
+    }
+    auto witness = object_witness.witness ? std::make_unique<NativeObjectWitness::Collector>(object_witness.writer, check_cancel) : nullptr;
+    GCodeOutputStream file(boost::nowide::fopen(path_tmp.c_str(), "wb"), m_processor, emission.get(), witness.get());
     if (! file.is_open()) {
         BOOST_LOG_TRIVIAL(error) << std::string("G-code export to ") + PathSanitizer::sanitize(path) + " failed.\nCannot open the file for writing.\n" << std::endl;
         if (!fs::exists(folder)) {
@@ -1895,6 +1988,10 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
         throw;
     }
     file.close();
+    if (emission && !file.get_last_error().empty()) {
+        boost::nowide::remove(path_tmp.c_str());
+        throw Slic3r::RuntimeError("NATIVE_EMISSION_FINAL_UNAVAILABLE");
+    }
 
     check_placeholder_parser_failed();
 
@@ -1964,7 +2061,7 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
                                                  m_print->get_physical_unprintable_filaments(m_print->get_slice_used_filaments(false)));
     }
 
-    m_processor.finalize(true);
+    m_processor.finalize(true, emission.get());
 //    DoExport::update_print_estimated_times_stats(m_processor, print->m_print_statistics);
     DoExport::update_print_estimated_stats(m_processor, m_writer.extruders(), print->m_print_statistics);
     // check the print mass was within limit
@@ -2003,11 +2100,26 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
         BOOST_LOG_TRIVIAL(info) << boost::format("rename_file from %1% to %2% successfully")% path_tmp_safe % path_safe;
     }
 
+    if (provenance) {
+        const GCodeProcessorResult& finalized_result = result ? *result : m_processor.get_result();
+        if (preview_execution_sha256.empty())
+            NativeProcessorMoveMap::publish(path, finalized_result, *provenance, check_cancel);
+        else
+            NativePreview::publish_with_processor_map(path, finalized_result, *provenance, preview_execution_sha256,
+                                                      {}, check_cancel);
+    }
+    if (emission)
+        NativeEmissionMap::publish(path, *emission, check_cancel);
+    if (native_object_map)
+        NativeObjectMap::publish(path, *print, check_cancel, witness.get());
+
     BOOST_LOG_TRIVIAL(info) << "Exporting G-code finished" << log_memory_info();
     print->set_done(psGCodeExport);
     //BBS: set enable_label_object
-    result->label_object_enabled = m_enable_label_object;
-    result->support_material_on_wipe_tower = print->support_material_on_wipe_tower();
+    if (result != nullptr) {
+        result->label_object_enabled = m_enable_label_object;
+        result->support_material_on_wipe_tower = print->support_material_on_wipe_tower();
+    }
     // Write the profiler measurements to file
     PROFILE_UPDATE();
     PROFILE_OUTPUT(debug_out_path("gcode-export-profile.txt").c_str());
@@ -3633,7 +3745,7 @@ void GCode::process_layers(
 
     // The pipeline is variable: The vase mode filter is optional.
     const auto generator = tbb::make_filter<void, GCode::LayerResult>(slic3r_tbb_filtermode::serial_in_order,
-        [this, &print, &tool_ordering, &print_object_instances_ordering, &layers_to_print, &layer_to_print_idx](tbb::flow_control& fc) -> GCode::LayerResult {
+        [this, &print, &tool_ordering, &print_object_instances_ordering, &layers_to_print, &layer_to_print_idx, &output_stream](tbb::flow_control& fc) -> GCode::LayerResult {
             if (layer_to_print_idx == layers_to_print.size()) {
                 fc.stop();
                 return {};
@@ -3646,7 +3758,10 @@ void GCode::process_layers(
                 //BBS
                 check_placeholder_parser_failed();
                 print.throw_if_canceled();
-                GCode::LayerResult res = this->process_layer(print, layer.second, layer_tools, &layer == &layers_to_print.back(), &print_object_instances_ordering, tool_ordering.get_most_used_extruder(), size_t(-1));
+                auto* witness = output_stream.witness();
+                GCode::LayerResult res = this->process_layer(print, layer.second, layer_tools, &layer == &layers_to_print.back(),
+                    &print_object_instances_ordering, tool_ordering.get_most_used_extruder(), size_t(-1), false, witness);
+                if (witness) witness->seal_layer(res.gcode);
                 res.gcode_store_pos = layer_to_print_idx - 1;
                 return std::move(res);
             }
@@ -3694,9 +3809,10 @@ void GCode::process_layers(
     });
 
     // step 5: rewite
-    const auto write_gocde= tbb::make_filter<GCode::LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
-    [&gcode_editer = *this->m_gcode_editer.get(), &layers_extruder_adjustments](GCode::LayerResult in) -> std::string {
-         return gcode_editer.write_layer_gcode(std::move(in.gcode), in.not_set_additional_fan, in.layer_id, in.layer_time, layers_extruder_adjustments[in.gcode_store_pos]);
+    const auto write_gocde= tbb::make_filter<GCode::LayerResult, GCode::LayerResult>(slic3r_tbb_filtermode::serial_in_order,
+    [&gcode_editer = *this->m_gcode_editer.get(), &layers_extruder_adjustments](GCode::LayerResult in) -> GCode::LayerResult {
+         in.gcode = gcode_editer.write_layer_gcode(std::move(in.gcode), in.not_set_additional_fan, in.layer_id, in.layer_time, layers_extruder_adjustments[in.gcode_store_pos]);
+         return in;
     });
 
     std::vector<GCode::LayerResult> gcode_res;
@@ -3716,8 +3832,11 @@ void GCode::process_layers(
         });
 
 
-    const auto output = tbb::make_filter<std::string, void>(slic3r_tbb_filtermode::serial_in_order,
-    [&output_stream](std::string s) { output_stream.write(s); });
+    uint64_t emission_invocation = 0;
+    const auto output = tbb::make_filter<GCode::LayerResult, void>(slic3r_tbb_filtermode::serial_in_order,
+    [&output_stream, &emission_invocation](GCode::LayerResult in) {
+        output_stream.write_layer(in.gcode, emission_invocation, in.layer_id);
+    });
 
     // BBS: apply cooling
     // The pipeline elements are joined using const references, thus no copying is performed.
@@ -4582,7 +4701,8 @@ GCode::LayerResult GCode::process_layer(
     // Otherwise print a single copy of a single object.
     const size_t                     		 single_object_instance_idx,
     // BBS
-    const bool                               prime_extruder)
+    const bool                               prime_extruder,
+    NativeObjectWitness::Collector*          witness)
 {
     assert(! layers.empty());
     // Either printing all copies of all objects, or just a single copy of a single object.
@@ -5368,6 +5488,12 @@ GCode::LayerResult GCode::process_layer(
                 gcode+="; PURGING FINISHED\n";
             for (InstanceToPrint &instance_to_print : instances_to_print) {
                 const auto& inst = instance_to_print.print_object.instances()[instance_to_print.instance_id];
+                const auto observe_object = [&](NativeObjectWitness::Kind kind) {
+                    if (!witness || print_wipe_extrusions) return NativeObjectWitness::Operation{};
+                    const auto& object = instance_to_print.print_object;
+                    return witness->operation({object.id().id, inst.model_instance->id().id, object.model_object()->id().id},
+                                              kind, gcode.size());
+                };
                 const LayerToPrint &layer_to_print = layers[instance_to_print.layer_id];
                 // To control print speed of the 1st object layer printed over raft interface.
                 bool object_layer_over_raft = layer_to_print.object_layer && layer_to_print.object_layer->id() > 0 &&
@@ -5513,10 +5639,10 @@ GCode::LayerResult GCode::process_layer(
                             temp_start_str.clear();
                             has_insert_timelapse_gcode = true;
                         }
-                        gcode += this->extrude_infill(print, by_region_specific, false);
-                        gcode += this->extrude_perimeters(print, by_region_specific);
+                        gcode += this->extrude_infill(print, by_region_specific, false, observe_object(NativeObjectWitness::Kind::Infill));
+                        gcode += this->extrude_perimeters(print, by_region_specific, observe_object(NativeObjectWitness::Kind::Perimeter));
                     } else {
-                        gcode += this->extrude_perimeters(print, by_region_specific);
+                        gcode += this->extrude_perimeters(print, by_region_specific, observe_object(NativeObjectWitness::Kind::Perimeter));
                         if (!has_wipe_tower && need_insert_timelapse_gcode_for_traditional && printer_structure == PrinterStructure::psI3
                             && !has_insert_timelapse_gcode && has_infill(by_region_specific)) {
                             gcode += this->retract(false, false, auto_lift_type, true);
@@ -5534,10 +5660,10 @@ GCode::LayerResult GCode::process_layer(
                             temp_start_str.clear();
                             has_insert_timelapse_gcode = true;
                         }
-                        gcode += this->extrude_infill(print,by_region_specific, false);
+                        gcode += this->extrude_infill(print, by_region_specific, false, observe_object(NativeObjectWitness::Kind::Infill));
                     }
                     // ironing
-                    gcode += this->extrude_infill(print,by_region_specific, true);
+                    gcode += this->extrude_infill(print, by_region_specific, true, observe_object(NativeObjectWitness::Kind::Ironing));
                     if (!filament_info.use_for_object)
                         filament_info.use_for_object = true;
                 }
@@ -6201,7 +6327,7 @@ double GCode::get_path_speed(const ExtrusionPath &path)
     return speed;
 }
 
-std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, double speed)
+std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, double speed, NativeObjectWitness::Operation witness)
 {
     // get a copy; don't modify the orientation of the original loop object otherwise
     // next copies (if any) would not detect the correct orientation
@@ -6321,7 +6447,7 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
             // Then extrude it
             set_scarf_seam_start_flag(true);
             for (const auto &p : new_loop.get_all_paths()) {
-                gcode += this->_extrude(*p, description, speed_for_path(*p), set_holes_and_compensation_speed);
+                gcode += this->_extrude(*p, description, speed_for_path(*p), set_holes_and_compensation_speed, false, witness.shifted(gcode.size()));
                 set_scarf_seam_start_flag(false);
             }
             set_last_scarf_seam_flag(true);
@@ -6350,7 +6476,7 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
         }
 
         for (ExtrusionPaths::iterator path = paths.begin(); path != paths.end(); ++path) {
-            gcode += this->_extrude(*path, description, speed_for_path(*path), set_holes_and_compensation_speed);
+            gcode += this->_extrude(*path, description, speed_for_path(*path), set_holes_and_compensation_speed, false, witness.shifted(gcode.size()));
         }
         set_last_scarf_seam_flag(false);
     }
@@ -6420,12 +6546,12 @@ std::string GCode::extrude_loop(ExtrusionLoop loop, std::string description, dou
     return gcode;
 }
 
-std::string GCode::extrude_multi_path(ExtrusionMultiPath multipath, std::string description, double speed)
+std::string GCode::extrude_multi_path(ExtrusionMultiPath multipath, std::string description, double speed, NativeObjectWitness::Operation witness)
 {
     // extrude along the path
     std::string gcode;
     for (ExtrusionPath path : multipath.paths)
-        gcode += this->_extrude(path, description, speed);
+        gcode += this->_extrude(path, description, speed, false, false, witness.shifted(gcode.size()));
 
     // BBS
     if (m_wipe.enable && FILAMENT_CONFIG(wipe)) {
@@ -6450,24 +6576,24 @@ std::string GCode::extrude_multi_path(ExtrusionMultiPath multipath, std::string 
     return gcode;
 }
 
-std::string GCode::extrude_entity(const ExtrusionEntity &entity, std::string description, double speed)
+std::string GCode::extrude_entity(const ExtrusionEntity &entity, std::string description, double speed, NativeObjectWitness::Operation witness)
 {
     if (const ExtrusionPath* path = dynamic_cast<const ExtrusionPath*>(&entity))
-        return this->extrude_path(*path, description, speed);
+        return this->extrude_path(*path, description, speed, witness);
     else if (const ExtrusionMultiPath* multipath = dynamic_cast<const ExtrusionMultiPath*>(&entity))
-        return this->extrude_multi_path(*multipath, description, speed);
+        return this->extrude_multi_path(*multipath, description, speed, witness);
     else if (const ExtrusionLoop* loop = dynamic_cast<const ExtrusionLoop*>(&entity))
-        return this->extrude_loop(*loop, description, speed);
+        return this->extrude_loop(*loop, description, speed, witness);
     else
         throw Slic3r::InvalidArgument("Invalid argument supplied to extrude()");
     return "";
 }
 
-std::string GCode::extrude_path(ExtrusionPath path, std::string description, double speed)
+std::string GCode::extrude_path(ExtrusionPath path, std::string description, double speed, NativeObjectWitness::Operation witness)
 {
 //    description += ExtrusionEntity::role_to_string(path.role());
     bool flag = path.get_customize_flag() == CustomizeFlag::cfFloatingVerticalShell;
-    std::string gcode = this->_extrude(path, description, speed,flag);
+    std::string gcode = this->_extrude(path, description, speed, flag, false, witness);
     if (m_wipe.enable && FILAMENT_CONFIG(wipe)) {
         m_wipe.path = path.polyline;
         if (is_tree(this->config().support_type) && (path.role() == erSupportMaterial || path.role() == erSupportMaterialInterface || path.role() == erSupportTransition)) {
@@ -6495,7 +6621,7 @@ std::string GCode::extrude_path(ExtrusionPath path, std::string description, dou
 }
 
 // Extrude perimeters: Decide where to put seams (hide or align seams).
-std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region)
+std::string GCode::extrude_perimeters(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, NativeObjectWitness::Operation witness)
 {
     std::string gcode;
     for (const ObjectByExtruder::Island::Region &region : by_region)
@@ -6512,14 +6638,15 @@ std::string GCode::extrude_perimeters(const Print &print, const std::vector<Obje
                     gcode += "; COOLING_NODE: " + std::to_string(ee_node_id) + "\n";
                 }
 
-                gcode += this->extrude_entity(*ee, "perimeter", -1.);
+                gcode += this->extrude_entity(*ee, "perimeter", -1., witness.shifted(gcode.size()));
             }
         }
     return gcode;
 }
 
 // Chain the paths hierarchically by a greedy algorithm to minimize a travel distance.
-std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing)
+std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectByExtruder::Island::Region> &by_region, bool ironing,
+                                NativeObjectWitness::Operation witness)
 {
     std::string 		 gcode;
     ExtrusionEntitiesPtr extrusions;
@@ -6538,9 +6665,9 @@ std::string GCode::extrude_infill(const Print &print, const std::vector<ObjectBy
                     auto *eec = dynamic_cast<const ExtrusionEntityCollection*>(fill);
                     if (eec) {
                         for (ExtrusionEntity *ee : eec->chained_path_from(m_last_pos).entities)
-                            gcode += this->extrude_entity(*ee, extrusion_name);
+                            gcode += this->extrude_entity(*ee, extrusion_name, -1., witness.shifted(gcode.size()));
                     } else
-                        gcode += this->extrude_entity(*fill, extrusion_name);
+                        gcode += this->extrude_entity(*fill, extrusion_name, -1., witness.shifted(gcode.size()));
                 }
             }
         }
@@ -6637,22 +6764,34 @@ void GCode::GCodeOutputStream::flush()
 void GCode::GCodeOutputStream::close()
 {
     if (this->f) {
-        ::fclose(this->f);
+        if (::fclose(this->f) != 0 && m_emission && m_write_errno == 0)
+            m_write_errno = errno;
         this->f = nullptr;
     }
 }
 
-void GCode::GCodeOutputStream::write(const char *what)
+void GCode::GCodeOutputStream::write(const char *what, uint64_t scope)
 {
     if (what != nullptr) {
         const char* gcode = what;
         // writes string to file
         const size_t len = ::strlen(gcode);
-        if (::fwrite(gcode, 1, len, this->f) != len && m_write_errno == 0)
+        const size_t written = ::fwrite(gcode, 1, len, this->f);
+        if (written != len && m_write_errno == 0)
             m_write_errno = errno;
+        if (m_emission) {
+            if (written != len) throw Slic3r::RuntimeError("NATIVE_EMISSION_FINAL_UNAVAILABLE");
+            m_emission->capture(std::string_view(gcode, written), scope);
+        }
         //FIXME don't allocate a string, maybe process a batch of lines?
         m_processor.process_buffer(std::string(gcode));
     }
+}
+
+void GCode::GCodeOutputStream::write_layer(const std::string& what, uint64_t& invocation, uint64_t local_layer)
+{
+    const uint64_t scope = m_emission ? m_emission->open_scope(invocation, local_layer) : 0;
+    this->write(what.c_str(), scope);
 }
 
 void GCode::GCodeOutputStream::writeln(const std::string &what)
@@ -7123,7 +7262,8 @@ double GCode::calc_max_volumetric_speed(const double layer_height, const double 
     return res;
 }
 
-std::string GCode::_extrude(const ExtrusionPath &path, std::string description, double speed, bool use_seperate_speed, bool is_first_slope)
+std::string GCode::_extrude(const ExtrusionPath &path, std::string description, double speed, bool use_seperate_speed,
+                           bool is_first_slope, NativeObjectWitness::Operation witness)
 {
     std::string gcode;
 
@@ -7511,6 +7651,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
         }
     };
 
+    using Writer = NativeObjectWitness::Writer;
+    const auto append_extrusion = [&](Writer kind, double delta, bool force, std::string fragment) {
+        witness.emitted(gcode.size(), int(path.role()), kind, delta, force, fragment);
+        gcode += fragment;
+    };
     double path_length = 0.;
     {
         std::string comment = GCodeWriter::full_gcode_comment ? description : "";
@@ -7529,10 +7674,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                 path_length += line_length;
 
                 if (sloped == nullptr) {
-                    gcode += m_writer.extrude_to_xy(
-                        this->point_to_gcode(line.b),
-                        e_per_mm * line_length,
-                        comment,path.is_force_no_extrusion());
+                    const double delta = e_per_mm * line_length;
+                    const bool force = path.is_force_no_extrusion();
+                    append_extrusion(Writer::LinearXY, delta, force,
+                        m_writer.extrude_to_xy(this->point_to_gcode(line.b), delta, comment, force));
                 } else {
                     // Sloped extrusion
                     auto dE = e_per_mm * line_length;
@@ -7543,7 +7688,7 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                     Vec3d dest3d(dest2d(0), dest2d(1), get_sloped_z(z_ratio));
                     //BBS: todo, should use small e at start to get good seam
                     double slope_e = dE * e_ratio;
-                    gcode += m_writer.extrude_to_xyz(dest3d, slope_e);
+                    append_extrusion(Writer::LinearXYZ, slope_e, false, m_writer.extrude_to_xyz(dest3d, slope_e));
                 }
                 check_and_insert_timelapse(line.b);
             }
@@ -7562,10 +7707,10 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                         if (line_length < EPSILON)
                             continue;
                         path_length += line_length;
-                        gcode += m_writer.extrude_to_xy(
-                            this->point_to_gcode(line.b),
-                            e_per_mm * line_length,
-                            comment, path.is_force_no_extrusion());
+                        const double delta = e_per_mm * line_length;
+                        const bool force = path.is_force_no_extrusion();
+                        append_extrusion(Writer::LinearXY, delta, force,
+                            m_writer.extrude_to_xy(this->point_to_gcode(line.b), delta, comment, force));
                         check_and_insert_timelapse(line.b);
                     }
                     break;
@@ -7579,12 +7724,11 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                         continue;
                     const Vec2d center_offset = this->point_to_gcode(arc.center) - this->point_to_gcode(arc.start_point);
                     path_length += arc_length;
-                    gcode += m_writer.extrude_arc_to_xy(
-                            this->point_to_gcode(arc.end_point),
-                            center_offset,
-                            e_per_mm * arc_length,
-                            arc.direction == ArcDirection::Arc_Dir_CCW,
-                            comment, path.is_force_no_extrusion());
+                    const double delta = e_per_mm * arc_length;
+                    const bool force = path.is_force_no_extrusion();
+                    const bool ccw = arc.direction == ArcDirection::Arc_Dir_CCW;
+                    append_extrusion(ccw ? Writer::ArcCCW : Writer::ArcCW, delta, force,
+                        m_writer.extrude_arc_to_xy(this->point_to_gcode(arc.end_point), center_offset, delta, ccw, comment, force));
                     check_and_insert_timelapse(arc.end_point);
                     break;
                 }

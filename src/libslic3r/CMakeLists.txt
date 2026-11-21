@@ -200,6 +200,22 @@ set(lisbslic3r_sources
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
     GCode/GCodeProcessor.cpp
+    GCode/NativeEmissionMap.cpp
+    GCode/NativeEmissionMap.hpp
+    GCode/NativeEmissionMapFile.cpp
+    GCode/NativeObjectMap.cpp
+    GCode/NativeObjectMap.hpp
+    GCode/NativeObjectWitness.cpp
+    GCode/NativeObjectWitness.hpp
+    GCode/NativeProcessorProvenance.cpp
+    GCode/NativeProcessorMoveMap.cpp
+    GCode/NativeProcessorMoveMap.hpp
+    GCode/NativeProcessorMoveMapNative.cpp
+    GCode/NativePreview.cpp
+    GCode/NativePreview.hpp
+    GCode/NativePreviewNative.cpp
+    GCode/NativePreviewPublish.cpp
+    GCode/NativePreviewPublish.hpp
     GCode/GCodeProcessor.hpp
     GCode/AvoidCrossingPerimeters.cpp
     GCode/AvoidCrossingPerimeters.hpp
@@ -689,6 +705,7 @@ set(OCCT_LIBS
 
 
 target_link_libraries(libslic3r
+    OpenSSL::Crypto
     noise::noise
     libnest2d
     admesh

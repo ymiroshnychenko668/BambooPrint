@@ -21,6 +21,9 @@ struct Limits {
 };
 using CheckCancel = NativeProcessorProvenance::Collector::CheckCancel;
 
+inline constexpr char sidecar_suffix[] = ".processor-map.jsonl";
+void write_capability(const std::string &output_path);
+
 // Trusted native-export call only. Both arguments are borrowed, finalized and
 // immutable for the whole call. The directory belongs to the isolated exporter;
 // the caller keeps this pinned parent directory at its pathname for publication.

@@ -159,7 +159,7 @@ class Output {
     uint64_t bytes = 0;
 public:
     Output(const FinalFile &source, Limits value) : directory(source.directory.value),
-        final_name(source.name + ".processor-map.jsonl"), pending_name(final_name + ".pending"), limits(value) {
+        final_name(source.name + sidecar_suffix), pending_name(final_name + ".pending"), limits(value) {
         file.value = ::openat(directory, pending_name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         require(file.value >= 0, "NATIVE_PROCESSOR_MAP_OUTPUT_UNAVAILABLE");
         if (::fstat(file.value, &owned) != 0) { ::unlinkat(directory, pending_name.c_str(), 0); fail("NATIVE_PROCESSOR_MAP_OUTPUT_UNAVAILABLE"); }
@@ -217,6 +217,82 @@ public:
 };
 #endif
 } // namespace
+
+void write_capability(const std::string &output_path)
+{
+#ifndef __linux__
+    (void)output_path;
+    fail("NATIVE_PROCESSOR_MAP_UNSUPPORTED_PLATFORM");
+#else
+    const auto provenance = NativeProcessorProvenance::Limits{};
+    const auto map = Limits{};
+    std::string payload = R"({
+  "schema": "corvus-native-processor-capability/1",
+  "mapSchema": "corvus-native-processor-map/1",
+  "generator": "corvusprint-gcodeprocessor/1",
+  "enumNamespace": "corvusprint-processor-enums/1",
+  "basis": "NATIVE_PROCESSOR_OBSERVATION",
+  "lineage": "ORIGINAL_PROCESSOR_CALLBACK_BYTES",
+  "originalOffsetDomain": "ORIGINAL_EXPORT_BYTES",
+  "outputOffsetDomain": "FINAL_GCODE_BYTES",
+  "platform": "LINUX",
+  "pipeline": "FRESH_BY_LAYER",
+  "optInEnvironment": "CORVUS_NATIVE_PROCESSOR_MAP",
+  "optInValue": "1",
+  "rewritePasses": "2",
+  "unsupportedFeatures": ["CACHED_EXPORT", "BY_OBJECT", "SPIRAL", "Z_SMOOTHING", "EXTERNAL_POSTPROCESS"],
+  "nativeGcodeIdMeaning": "LEGACY_PROCESSOR_COUNTER",
+  "coordinateBasis": "NATIVE_PREVIEW_TRANSFORMED",
+  "timeBasis": "NATIVE_PREFIX_ESTIMATE",
+  "timeModeOrder": ["NORMAL", "STEALTH"],
+  "objectLabelMeaning": "UNVERIFIED_NATIVE_LABEL",
+  "extruderFieldMeaning": "NATIVE_FILAMENT_SLOT",
+  "arcSamples": "NATIVE_PREVIEW_INTERPOLATION",
+  "verification": "NOT_EVALUATED",
+  "sidecarSuffix": ")";
+    payload += sidecar_suffix;
+    payload += "\"";
+    const auto field = [&](const char *name, uint64_t value) {
+        payload += ",\n  \"";
+        payload += name;
+        payload += "\": \"";
+        payload += std::to_string(value);
+        payload += "\"";
+    };
+    field("maxOriginalBytes", provenance.source_bytes);
+    field("maxFinalGcodeBytes", provenance.output_bytes);
+    field("maxPhysicalLinesPerStream", provenance.physical_lines);
+    field("maxLineBytes", provenance.line_bytes);
+    field("maxParserRecords", provenance.parser_records);
+    field("maxSources", std::min(provenance.sources, map.sources));
+    field("maxMoves", std::min(provenance.moves, map.moves));
+    field("maxSpansPerStream", provenance.spans);
+    field("maxLinksPerStream", provenance.links);
+    field("maxLinksPerSpan", provenance.links_per_span);
+    field("maxTokenBytes", provenance.token_bytes);
+    field("maxBuildWork", provenance.work);
+    field("maxQueryWork", provenance.query_work);
+    field("maxTrackedVectorAllocationBytes", provenance.allocation_bytes);
+    field("maxBindings", map.bindings);
+    field("maxArcPoints", map.arc_points);
+    field("maxMapBytes", map.map_bytes);
+    field("maxRecordBytes", map.record_bytes);
+    payload += "\n}\n";
+
+    Fd file(::open(output_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    require(file.value >= 0, "NATIVE_PROCESSOR_MAP_PROBE_OUTPUT_UNAVAILABLE");
+    size_t offset = 0;
+    while (offset < payload.size()) {
+        const ssize_t n = ::write(file.value, payload.data() + offset, payload.size() - offset);
+        if (n < 0 && errno == EINTR) continue;
+        require(n > 0, "NATIVE_PROCESSOR_MAP_PROBE_OUTPUT_UNAVAILABLE");
+        offset += size_t(n);
+    }
+    const int fd = file.value;
+    file.value = -1;
+    require(::close(fd) == 0, "NATIVE_PROCESSOR_MAP_PROBE_OUTPUT_UNAVAILABLE");
+#endif
+}
 
 void detail::write(const std::string &path, const ResultView &result,
                    const NativeProcessorProvenance::Collector &provenance, Limits limits, CheckCancel cancel) {

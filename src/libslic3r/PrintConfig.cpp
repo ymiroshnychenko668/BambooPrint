@@ -3802,7 +3802,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("marlin");
     def->enum_values.push_back("klipper");
     //def->enum_values.push_back("reprap");
-    //def->enum_values.push_back("reprapfirmware");
+    def->enum_values.push_back("reprapfirmware");
     //def->enum_values.push_back("repetier");
     //def->enum_values.push_back("teacup");
     //def->enum_values.push_back("makerware");
@@ -3815,7 +3815,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back("Marlin(legacy)");
     def->enum_labels.push_back("Klipper");
     //def->enum_labels.push_back("RepRap/Sprinter");
-    //def->enum_labels.push_back("RepRapFirmware");
+    def->enum_labels.push_back("RepRapFirmware");
     //def->enum_labels.push_back("Repetier");
     //def->enum_labels.push_back("Teacup");
     //def->enum_labels.push_back("MakerWare (MakerBot)");
@@ -9927,8 +9927,6 @@ std::map<std::string, std::string> validate(const FullPrintConfig &cfg, bool und
 #define PRINT_CONFIG_CACHE_INITIALIZE(CLASSES_SEQ) \
     BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_DEFINITION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
     int print_config_static_initializer() { \
-        /* Putting a trace here to avoid the compiler to optimize out this function. */ \
-        BOOST_LOG_TRIVIAL(trace) << "Initializing StaticPrintConfigs"; \
         BOOST_PP_SEQ_FOR_EACH(PRINT_CONFIG_CACHE_ELEMENT_INITIALIZATION, _, BOOST_PP_TUPLE_TO_SEQ(CLASSES_SEQ)) \
         return 1; \
     }

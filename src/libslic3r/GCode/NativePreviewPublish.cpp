@@ -19,14 +19,16 @@
 #endif
 
 namespace Slic3r::NativePreview {
-namespace {
-[[noreturn]] void fail(const char *code) { throw std::runtime_error(code); }
-void require(bool b, const char *code) { if (!b) fail(code); }
-bool valid_sha(const std::string &s) {
-    return s.size() == 64 && std::all_of(s.begin(), s.end(), [](char c) {
+bool valid_sha256(std::string_view value)
+{
+    return value.size() == 64 && std::all_of(value.begin(), value.end(), [](char c) {
         return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
     });
 }
+
+namespace {
+[[noreturn]] void fail(const char *code) { throw std::runtime_error(code); }
+void require(bool b, const char *code) { if (!b) fail(code); }
 #ifdef __linux__
 constexpr uint64_t MAX_SOURCE = 1073741824, MAX_MAP = 268435456;
 struct Fd {
@@ -189,7 +191,7 @@ void validate_request(const std::string &path, uint64_t source_bytes, const std:
                       const std::string &execution_sha256, const detail::Builder &builder, const Limits &limits) {
     const Limits hard{};
     require(!path.empty() && path.size() <= 4096 && path.find('\0') == std::string::npos &&
-            valid_sha(source_sha256) && valid_sha(execution_sha256) && source_bytes <= MAX_SOURCE && builder &&
+            valid_sha256(source_sha256) && valid_sha256(execution_sha256) && source_bytes <= MAX_SOURCE && builder &&
             limits.moves && limits.moves <= hard.moves && limits.arc_points && limits.arc_points <= hard.arc_points &&
             limits.cpv_bytes && limits.cpv_bytes <= hard.cpv_bytes && limits.sidecar_bytes && limits.sidecar_bytes <= hard.sidecar_bytes,
             "NATIVE_PREVIEW_INVALID_ARGUMENT");
@@ -214,6 +216,34 @@ void emit_package(int dir, const std::string &name, Input &source, Input &map,
     cpv.retain(); sidecar.retain();
     require(::fsync(dir) == 0, "NATIVE_PREVIEW_OUTPUT_UNAVAILABLE");
 }
+#endif
+}
+
+void write_capability(const std::string &path)
+{
+#ifndef __linux__
+    (void)path;
+    fail("NATIVE_PREVIEW_PLATFORM_UNSUPPORTED");
+#else
+    require(!path.empty() && path.size() <= 4096 && path.find('\0') == std::string::npos,
+            "NATIVE_PREVIEW_INVALID_PATH");
+    const std::filesystem::path parsed(path);
+    const std::string name = parsed.filename().string();
+    require(!name.empty() && name != "." && name != "..", "NATIVE_PREVIEW_INVALID_PATH");
+    const auto parent = parsed.parent_path().empty() ? std::filesystem::path(".") : parsed.parent_path();
+    Fd dir(::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    require(dir.fd >= 0, "NATIVE_PREVIEW_OUTPUT_UNAVAILABLE");
+    const std::string capability =
+        R"({"schema":"corvus-native-preview-capability/1","mapSchema":"corvus-native-preview-map/1",)"
+        R"("cpvSchema":"CPV1/1","basis":"FINAL_PROCESSOR_RESULT_AND_COLLECTOR","relation":"ONE_RECORD_PER_FINAL_MOVE",)"
+        R"("optInEnvironment":"CORVUS_NATIVE_PREVIEW_MAP","optInValue":"1",)"
+        R"("executionIdentityEnvironment":"CORVUS_NATIVE_EXECUTION_SHA256","cpvSuffix":".preview.cpv",)"
+        R"("mapSuffix":".preview-map.json","verification":"NOT_EVALUATED"})" "\n";
+    Output output(dir.fd, name);
+    output.write(capability, 4096, {});
+    output.install();
+    require(::fsync(dir.fd) == 0, "NATIVE_PREVIEW_OUTPUT_UNAVAILABLE");
+    output.retain();
 #endif
 }
 
