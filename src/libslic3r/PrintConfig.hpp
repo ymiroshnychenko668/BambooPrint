@@ -829,6 +829,12 @@ protected:
                 m_keys.emplace_back(kvp.first);
                 const ConfigOptionDef *def = defs->get(kvp.first);
                 assert(def != nullptr);
+                if (opt->type() == coEnums) {
+                    if (opt->nullable())
+                        static_cast<ConfigOptionEnumsGenericNullable *>(opt)->keys_map = def->enum_keys_map;
+                    else
+                        static_cast<ConfigOptionEnumsGeneric *>(opt)->keys_map = def->enum_keys_map;
+                }
                 if (def->default_value)
                     opt->set(def->default_value.get());
             }

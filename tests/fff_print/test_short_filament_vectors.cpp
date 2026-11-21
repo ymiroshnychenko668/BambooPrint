@@ -55,16 +55,6 @@ DynamicPrintConfig two_filament_config()
     config.set_key_value("flush_volumes_matrix", new ConfigOptionFloats{0., 280., 280., 0.});
     config.set_key_value("wipe_tower_x", new ConfigOptionFloats{15.});
     config.set_key_value("wipe_tower_y", new ConfigOptionFloats{150.});
-    // full_print_config() clones FullPrintConfig::defaults(), whose generic enum vectors (cooling_slowdown_logic, ...)
-    // do not carry their definition's keys_map; the G-code export serializes the whole config and would dereference
-    // it. A config the CLI builds creates these options from their definition, which sets the map.
-    for (const std::string &key : config.keys()) {
-        ConfigOption *opt = config.option(key);
-        if (auto *enums = dynamic_cast<ConfigOptionEnumsGeneric *>(opt))
-            enums->keys_map = print_config_def.get(key)->enum_keys_map;
-        else if (auto *nullable_enums = dynamic_cast<ConfigOptionEnumsGenericNullable *>(opt))
-            nullable_enums->keys_map = print_config_def.get(key)->enum_keys_map;
-    }
     return config;
 }
 
