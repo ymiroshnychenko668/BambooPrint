@@ -35,7 +35,7 @@ public:
             item_ptr_(&item),
             move_(item.translation()),
             rot_(item.rotation()),
-            overfit_(1.0) {}
+            overfit_(1.0), score_(0.) {}
 
         PackResult(double overfit = 1.0):
             item_ptr_(nullptr), overfit_(overfit) {}
@@ -76,10 +76,9 @@ public:
 
     void accept(PackResult& r) {
         if(r) {
-            //r.item_ptr_->translation(r.move_);
-            //r.item_ptr_->rotation(r.rot_);
-            //items_.emplace_back(*(r.item_ptr_));
-            static_cast<Subclass*>(this)->accept(r);
+            r.item_ptr_->translation(r.move_);
+            r.item_ptr_->rotation(r.rot_);
+            items_.emplace_back(*r.item_ptr_);
             farea_valid_ = false;
         }
     }

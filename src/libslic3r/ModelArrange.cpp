@@ -15,11 +15,12 @@ arrangement::ArrangePolygons get_arrange_polys(const Model &model, ModelInstance
     ArrangePolygons input;
     input.reserve(count);
     instances.clear(); instances.reserve(count);
-    ArrangePolygon ap;
     for (ModelObject *mo : model.objects)
         for (ModelInstance *minst : mo->instances) {
+            ArrangePolygon &ap = input.emplace_back();
             minst->get_arrange_polygon(&ap);
-            input.emplace_back(ap);
+            // New instances start on the physical bed. A negative bin ID marks an unfit item.
+            ap.bed_idx = 0;
             instances.emplace_back(minst);
         }
 

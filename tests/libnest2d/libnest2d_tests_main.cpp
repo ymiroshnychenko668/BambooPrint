@@ -595,14 +595,16 @@ TEST_CASE("PrusaPartsShouldFitIntoTwoBins", "[Nesting]") {
     // Get the input items and define the bin.
     std::vector<Item> input = prusaParts();
     auto bin = Box(250000000, 210000000);
+    for (auto &item : input)
+        item.allowed_rotations = {{0., 0}, {Pi / 2., 0}, {Pi, 0}, {3. * Pi / 2., 0}};
 
-    // Do the nesting. Check in each step if the remaining items are less than
-    // in the previous step. (Some algorithms can place more items in one step)
-    size_t pcount = input.size();
+    // The progress callback reports how many items have been placed.
+    size_t pcount = 0;
 
     size_t bins = libnest2d::nest(input, bin, 0, {},
-                                  ProgressFunction{[&pcount](unsigned cnt) {
-                                      REQUIRE(cnt < pcount);
+                                  ProgressFunction{[&pcount, &input](unsigned cnt) {
+                                      REQUIRE(cnt > pcount);
+                                      REQUIRE(cnt <= input.size());
                                       pcount = cnt;
                                   }});
 
@@ -612,8 +614,8 @@ TEST_CASE("PrusaPartsShouldFitIntoTwoBins", "[Nesting]") {
 
     // All parts should be processed by the algorithm
     REQUIRE(
-        std::all_of(input.begin(), input.end(), [](const Item &itm) {
-            return itm.binId() != BIN_ID_UNSET;
+        std::all_of(input.begin(), input.end(), [bins](const Item &itm) {
+            return itm.binId() >= 0 && size_t(itm.binId()) < bins;
         }));
 
     // Gather the items into piles of arranged polygons...
@@ -651,6 +653,7 @@ TEST_CASE("EmptyItemShouldBeUntouched", "[Nesting]") {
     std::vector<Item> items;
     items.emplace_back(Item{});   // Emplace empty item
     items.emplace_back(Item{ {0, 200} });   // Emplace zero area item
+    items.emplace_back(Item{{0, 0}, {100, 100}, {200, 200}});
 
     size_t bins = libnest2d::nest(items, bin);
 
@@ -662,12 +665,16 @@ TEST_CASE("LargeItemShouldBeUntouched", "[Nesting]") {
     auto bin = Box(250000000, 210000000); // dummy bin
 
     std::vector<Item> items;
-    items.emplace_back(RectangleItem{250000001, 210000001});  // Emplace large item
+    items.emplace_back(RectangleItem{260000000, 220000000});
+    const auto translation = items.front().translation();
+    const double rotation = items.front().rotation();
 
     size_t bins = libnest2d::nest(items, bin);
 
     REQUIRE(bins == 0u);
-    REQUIRE(items.front().binId() == BIN_ID_UNSET);
+    REQUIRE(items.front().binId() == BIN_ID_UNFIT);
+    REQUIRE(items.front().translation() == translation);
+    REQUIRE(double(items.front().rotation()) == rotation);
 }
 
 TEST_CASE("Items can be preloaded", "[Nesting]") {
@@ -705,6 +712,8 @@ TEST_CASE("Items can be preloaded", "[Nesting]") {
 
     SECTION("Preloaded Item should not affect free bins") {
         fixed_rect.markAsFixedInBin(1);
+        std::vector<Item> alone{movable_rect};
+        REQUIRE(libnest2d::nest(alone, bin, 0, cfg) == 1);
 
         size_t bins = libnest2d::nest(items, bin, 0, cfg);
 
@@ -717,8 +726,8 @@ TEST_CASE("Items can be preloaded", "[Nesting]") {
         REQUIRE(movable_rect.binId() == 0);
 
         auto bb = movable_rect.boundingBox();
-        REQUIRE(getX(bb.center()) == getX(bin.center()));
-        REQUIRE(getY(bb.center()) == getY(bin.center()));
+        REQUIRE(getX(bb.center()) == getX(alone.front().boundingBox().center()));
+        REQUIRE(getY(bb.center()) == getY(alone.front().boundingBox().center()));
     }
 }
 
@@ -1024,9 +1033,8 @@ TEST_CASE("pointOnPolygonContour", "[Geometry]") {
     REQUIRE(getX(first) == getX(ecache.coords(0)));
     REQUIRE(getY(first) == getY(ecache.coords(0)));
 
-    auto last = *std::prev(input.end());
-    REQUIRE(getX(last) == getX(ecache.coords(1.0)));
-    REQUIRE(getY(last) == getY(ecache.coords(1.0)));
+    REQUIRE(getX(first) == getX(ecache.coords(1.0)));
+    REQUIRE(getY(first) == getY(ecache.coords(1.0)));
 
     for(int i = 0; i <= 100; i++) {
         auto v = ecache.coords(i*(0.01));
@@ -1161,8 +1169,8 @@ TEST_CASE("Test for bed center distance optimization", "[Nesting], [NestKernels]
     
     NfpPlacer::Config pconfig;
     
-    pconfig.object_function = [](const Item &item) -> double {
-        return pl::magnsq<PointImpl, double>(item.boundingBox().center());
+    pconfig.object_function = [](const Item &item, const _ItemGroup<PolygonImpl> &) -> double {
+        return pl::magnsq<PointImpl, double>(item.boundingBox().center()) / (double(W) * W);
     };
     
     size_t bins = nest(input, bin, 0, NestConfig{pconfig});
@@ -1193,7 +1201,7 @@ TEST_CASE("Test for biggest bounding box area", "[Nesting], [NestKernels]")
     // Get the input items and define the bin.
     std::vector<RectangleItem> input(N, {W, W});
     
-    auto bin = Box::infinite();
+    const Box bin(N * W, N * W);
     
     NfpPlacer::Config pconfig;
     pconfig.rotations = {0.};
@@ -1205,10 +1213,11 @@ TEST_CASE("Test for biggest bounding box area", "[Nesting], [NestKernels]")
         pile_box = sl::boundingBox(pile);
     };
 
-    pconfig.object_function = [&pile_box](const Item &item) -> double {
+    const double bed_area = bin.area<double>() / (double(W) * W);
+    pconfig.object_function = [&pile_box, bed_area](const Item &item, const _ItemGroup<PolygonImpl> &) -> double {
         Box b = sl::boundingBox(item.boundingBox(), pile_box);
         double area = b.area<double>() / (double(W) * W);
-        return -area;
+        return bed_area - area;
     };
     
     size_t bins = nest(input, bin, 0, NestConfig{pconfig});
@@ -1221,7 +1230,9 @@ TEST_CASE("Test for biggest bounding box area", "[Nesting], [NestKernels]")
     MultiPolygon pile = merged_pile(input.begin(), input.end(), 0);
     Box bb = sl::boundingBox(pile);
     
-    // Here the result shall be a stairway of boxes
-    REQUIRE(pile.size() == N);
+    // The full bed is available to the optimizer, including disconnected placements.
+    // The union retains the area of every square and reaches the opposite edges.
+    REQUIRE(bb.defined);
+    REQUIRE(sl::area(pile) == Approx(double(N) * W * W));
     REQUIRE(bb.area() == double(N) * N * W * W);
 }

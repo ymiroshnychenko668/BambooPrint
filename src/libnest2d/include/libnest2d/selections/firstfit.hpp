@@ -44,6 +44,8 @@ public:
 
         typename Base::PackGroup fixed_bins;
         std::for_each(first, last, [this, &fixed_bins](Item& itm) {
+            if (itm.vertexCount() < 3 || itm.area() == 0.)
+                return;
             if (itm.isFixed()) {
                 if (itm.binId() < 0) itm.binId(0);
                 auto binidx = size_t(itm.binId());
@@ -57,6 +59,7 @@ public:
                 store_.emplace_back(itm);
             }
             });
+        packed_bins_ = fixed_bins;
 
         std::for_each(pconfig.m_excluded_regions.begin(), pconfig.m_excluded_regions.end(), [this, &pconfig](Item& itm) {
             pconfig.m_excluded_items.emplace_back(itm);
@@ -115,6 +118,8 @@ public:
 
         int item_id = 0;
         auto makeProgress = [this, &item_id](Placer &placer, size_t bin_idx) {
+            if (packed_bins_.size() <= bin_idx)
+                packed_bins_.resize(bin_idx + 1);
             packed_bins_[bin_idx] = placer.getItems();
             this->last_packed_bin_id_ = int(bin_idx);
             this->progress_(static_cast<unsigned>(item_id));
@@ -224,7 +229,6 @@ public:
                         placers.back().configure(pconfig);
                         if (fixed_bins.size() >= placers.size()) placers.back().preload(fixed_bins[placers.size() - 1]);
                         // placers.back().preload(pconfig.m_excluded_items);
-                        packed_bins_.emplace_back();
                         j = placers.size() - 1;
                     } else {
                         it->get().binId(BIN_ID_UNFIT);
