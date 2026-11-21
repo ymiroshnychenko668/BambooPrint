@@ -29,6 +29,7 @@
 #include "Calib.hpp"
 
 namespace Slic3r {
+namespace NativeObjectWitness { struct Options; }
 
 class GCode;
 class Layer;
@@ -910,6 +911,16 @@ public:
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                     ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map);
+    std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                     ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map);
+    std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                     ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map,
+                                     bool native_object_map);
+    std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                     ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map,
+                                     bool native_object_map, const NativeObjectWitness::Options& object_witness);
     //return 0 means successful
     int                 export_cached_data(const std::string& dir_path, int& obj_cnt_exported, bool with_space=false);
     int                 load_cached_data(const std::string& directory);

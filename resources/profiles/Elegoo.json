@@ -123,6 +123,10 @@
             "sub_path": "process/0.10mm Standard @Elegoo Neptune4 Plus 0.2 nozzle.json"
         },
         {
+            "name": "0.10mm Standard @Elegoo Neptune4Pro 0.2 nozzle",
+            "sub_path": "process/0.10mm Standard @Elegoo Neptune4Pro 0.2 nozzle.json"
+        },
+        {
             "name": "0.12mm Fine @Elegoo Neptune",
             "sub_path": "process/0.12mm Fine @Elegoo Neptune.json"
         },

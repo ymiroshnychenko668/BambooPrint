@@ -121,12 +121,12 @@
   "silent_mode": "0",
   "single_extruder_multi_material": "1",
   "change_filament_gcode": "",
-  "machine_pause_gcode": "PAUSE\n",
+  "machine_pause_gcode": "M226\n",
   "wipe": [
     "1"
   ],
   "default_filament_profile": [
-    "Troodon Generic ABS"
+    "Generic ABS @Troodon"
   ],
   "default_print_profile": "0.20mm Standard @Troodon2",
   "bed_exclude_area": [

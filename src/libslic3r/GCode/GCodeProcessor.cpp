@@ -4,6 +4,8 @@
 #include "libslic3r/LocalesUtils.hpp"
 #include "libslic3r/format.hpp"
 #include "GCodeProcessor.hpp"
+#include "NativeEmissionMap.hpp"
+#include "NativeProcessorProvenance.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/string/predicate.hpp>
@@ -562,8 +564,15 @@ void GCodeProcessor::TimeProcessor::reset()
     machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Normal)].enabled = true;
 }
 
-void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, std::vector<GCodeProcessorResult::MoveVertex>& moves, std::vector<size_t>& lines_ends, const TimeProcessContext& context)
+void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, std::vector<GCodeProcessorResult::MoveVertex>& moves,
+                                                std::vector<size_t>& lines_ends, const TimeProcessContext& context,
+                                                NativeProcessorProvenance::Collector* provenance, NativeEmissionMap::Collector* emission)
 {
+    const bool observing = provenance || emission;
+    const auto observe = [provenance, emission](const auto& event) {
+        if (provenance) event(*provenance);
+        if (emission) event(*emission);
+    };
     using namespace ExtruderPreHeating;
     FilePtr in{ boost::nowide::fopen(filename.c_str(), "rb") };
     if (in.f == nullptr)
@@ -875,9 +884,9 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, st
     };
 
     // helper function to write to disk
-    auto write_string = [](const std::string& file_path, FilePtr& out, std::string& str, size_t& out_file_pos, std::vector<size_t>* line_ends = nullptr) {
-        fwrite((const void*)str.c_str(), 1, str.length(), out.f);
-        if (ferror(out.f)) {
+    auto write_string = [observing](const std::string& file_path, FilePtr& out, std::string& str, size_t& out_file_pos, std::vector<size_t>* line_ends = nullptr) {
+        const size_t written = fwrite(str.data(), 1, str.size(), out.f);
+        if (ferror(out.f) || (observing && written != str.size())) {
             out.close();
             boost::nowide::remove(file_path.c_str());
             throw Slic3r::RuntimeError(std::string("Time estimator post process export failed.\nIs the disk full?\n"));
@@ -895,15 +904,20 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, st
     /*
         Read the file according to the buffer block size, read one line of gcode from the buffer each time and process it.
         Write to a new file when the buffer is full.
-        The callback function accepts the gcode content, line number, and buffer content
+        The callback reports whether a native placeholder replaced the original line.
     */
-    auto gcode_process = [&write_string](FilePtr& in, FilePtr& out, const std::string& filename_in, const std::string& filename_out, const std::function<void(std::string&, std::string&, int& line_id)>& gcode_line_handler, std::vector<size_t>* line_ends = nullptr, int buffer_size_in_kB = 64) {
+    using LineHandler = std::function<bool(std::string&, std::string&, int)>;
+    auto gcode_process = [&](FilePtr& in, FilePtr& out, const std::string& filename_out,
+                                                    const LineHandler& gcode_line_handler, std::vector<size_t>* line_ends,
+                                                    int buffer_size_in_kB) {
         // Read the input stream 64kB at a time, extract lines and process them.
         std::vector<char> buffer(buffer_size_in_kB * 1024 * 1.5, 0);
         std::string export_line;
         std::string gcode_line;
         int line_id = 0;
         size_t out_file_pos = 0;
+        uint64_t in_file_pos = 0;
+        observe([](auto& map) { map.begin_rewrite(); });
         // Line buffer.
         for (;;) {
             size_t cnt_read = ::fread(buffer.data(), 1, buffer.size(), in.f);
@@ -920,27 +934,68 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, st
                 // End of line is indicated also if end of file was reached.
                 eol |= eof && it_end == it_bufend;
                 gcode_line.insert(gcode_line.end(), it, it_end);
-                if (eol) {
-                    ++line_id;
-                    gcode_line += "\n";
-                    gcode_line_handler(gcode_line, export_line, line_id);
-                    export_line += gcode_line;
-                    if (export_line.length() >= buffer_size_in_kB * 1024)
-                        write_string(filename_out, out, export_line, out_file_pos, line_ends);
-                    gcode_line.clear();
-                }
-                // Skip EOL.
+                // Match the existing per-buffer CR-then-LF stepping exactly.
                 it = it_end;
                 if (it != it_bufend && *it == '\r')
                     ++it;
                 if (it != it_bufend && *it == '\n')
                     ++it;
+                if (eol) {
+                    ++line_id;
+                    const size_t raw_bytes = gcode_line.size();
+                    const std::string_view terminator(buffer.data() + (it_end - buffer.begin()), it - it_end);
+                    if (observing) {
+                        gcode_line.append(terminator);
+                        observe([&](auto& map) { map.consume(in_file_pos, gcode_line); });
+                        in_file_pos += gcode_line.size();
+                        gcode_line.resize(raw_bytes);
+                    }
+                    gcode_line += "\n";
+                    const size_t before = export_line.size();
+                    const bool replaced = gcode_line_handler(gcode_line, export_line, line_id);
+                    if (observing) {
+                        const auto emit_insertion = [&](std::string_view bytes) {
+                            if (bytes.empty()) return;
+                            if (emission) emission->emit_associated(0, raw_bytes, bytes);
+                            if (provenance) {
+                                if (raw_bytes) provenance->emit_associated(0, raw_bytes, bytes);
+                                else provenance->emit_unattributed(bytes);
+                            }
+                        };
+                        // Prepend from the M73 planner, then the line and any post-line insertion.
+                        emit_insertion(std::string_view(export_line).substr(before));
+                        if (replaced) {
+                            observe([&](auto& map) { map.emit_rewritten(0, raw_bytes, gcode_line); });
+                        } else {
+                            const std::string_view line(gcode_line);
+                            if (line.size() <= raw_bytes || line[raw_bytes] != '\n')
+                                throw std::runtime_error("NATIVE_PROCESSOR_PROVENANCE_UNEXPECTED_REWRITE");
+                            observe([&](auto& map) {
+                                if (raw_bytes) map.emit_copied(0, line.substr(0, raw_bytes));
+                                if (terminator == "\n") map.emit_copied(raw_bytes, "\n");
+                                else if (!terminator.empty()) map.emit_rewritten(raw_bytes, terminator.size(), "\n");
+                                else map.emit_unattributed("\n");
+                            });
+                            emit_insertion(line.substr(raw_bytes + 1));
+                        }
+                        observe([](auto& map) { map.end_input(); });
+                    }
+                    export_line += gcode_line;
+                    if (export_line.length() >= buffer_size_in_kB * 1024)
+                        write_string(filename_out, out, export_line, out_file_pos, line_ends);
+                    gcode_line.clear();
+                }
             }
             if (eof)
                 break;
         }
         if (!export_line.empty())
             write_string(filename_out, out, export_line, out_file_pos, line_ends);
+        if (observing) {
+            if (std::fflush(out.f) != 0)
+                throw Slic3r::RuntimeError("Time estimator post process export failed while flushing G-code.");
+            observe([](auto& map) { map.finish_rewrite(); });
+        }
         };
 
     auto handle_nozzle_change_line = [&](const std::string& line, int& old_filament, int& next_filament, int& extruder_id, int gcode_id, int& old_nozzle_id, int& new_nozzle_id)->bool {
@@ -1098,10 +1153,11 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, st
                 ++current_layer_id;
             }
         }
+        return processed;
         };
 
     // we don't need to get line ends here because it's not the final end
-    gcode_process(in, out, filename_in, filename_out, gcode_time_handler, nullptr, buffer_size_in_KB);
+    gcode_process(in, out, filename_out, gcode_time_handler, nullptr, buffer_size_in_KB);
 
     // updates moves' gcode ids which have been modified by the insertion of the M73 lines
     handle_offsets_of_first_process(offsets, moves, filament_blocks, extruder_blocks, skippable_blocks, machine_start_gcode_end_line_id, machine_end_gcode_start_line_id);
@@ -1220,7 +1276,7 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, st
     auto pre_operation_iter = inserted_operation_lines.begin();
     auto filament_change_handle = [&inserted_operation_lines, &pre_operation_iter,enable_pre_heating = context.enable_pre_heating](std::string& gcode_line, std::string& gcode_buffer, int line_id) {
         if (pre_operation_iter == inserted_operation_lines.end())
-            return;
+            return false;
         if (line_id == pre_operation_iter->first) {
             for (auto& elem : pre_operation_iter->second) {
                 const std::string& str = elem.first;
@@ -1248,6 +1304,7 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, st
             }
             ++pre_operation_iter;
         }
+        return false;
     };
 
     filename_in = filename_out; // filename_out is opened in read|write mode. During second process ,we ues filename_out as input
@@ -1256,10 +1313,16 @@ void GCodeProcessor::TimeProcessor::post_process(const std::string& filename, st
     std::string filename_out_safe = PathSanitizer::sanitize(filename_out);
 
     FilePtr new_out = boost::nowide::fopen(filename_out.c_str(), "wb");
-    std::fseek(out.f, 0, SEEK_SET); // move to start of the file and start reading gcode as in
+    if (new_out.f == nullptr || std::fseek(out.f, 0, SEEK_SET) != 0)
+        throw Slic3r::RuntimeError("Time estimator post process export failed opening the second rewrite.");
 
-    gcode_process(out, new_out, filename_in, filename_out, filament_change_handle, &lines_ends, buffer_size_in_KB);
-    new_out.close();
+    gcode_process(out, new_out, filename_out, filament_change_handle, &lines_ends, buffer_size_in_KB);
+    if (observing) {
+        if (std::fclose(std::exchange(new_out.f, nullptr)) != 0)
+            throw Slic3r::RuntimeError("Time estimator post process export failed closing the final rewrite.");
+    } else {
+        new_out.close();
+    }
 
     // recollect gcode offset caused by inserted operations
     handle_offsets_of_second_process(inserted_operation_lines, moves);
@@ -2558,6 +2621,8 @@ void GCodeProcessor::reset()
     m_used_filaments.reset();
 
     m_result.reset();
+    if (m_export_provenance)
+        m_export_provenance->reset_initial_moves_to_empty();
     m_result.id = ++s_result_id;
 
     m_last_default_color_id = 0;
@@ -2601,6 +2666,8 @@ DynamicConfig GCodeProcessor::export_config_for_render() const
 // throws CanceledException through print->throw_if_canceled() (sent by the caller as callback).
 void GCodeProcessor::process_file(const std::string& filename, std::function<void()> cancel_callback)
 {
+    if (m_export_provenance)
+        throw std::logic_error("Native processor provenance requires a fresh export");
     CNumericLocalesSetter locales_setter;
 
 #if ENABLE_GCODE_VIEWER_STATISTICS
@@ -2683,12 +2750,19 @@ void GCodeProcessor::initialize(const std::string& filename)
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
 
     // process gcode
+    m_export_provenance = nullptr;
     m_result.filename = filename;
     m_result.id = ++s_result_id;
     // 1st move must be a dummy move
     m_result.moves.emplace_back();
 }
 
+void GCodeProcessor::initialize_for_export(const std::string& filename, NativeProcessorProvenance::Collector& provenance)
+{
+    initialize(filename);
+    provenance.append_dummy_move(m_result.moves.size() - 1);
+    m_export_provenance = &provenance;
+}
 
 void GCodeProcessor::initialize_from_context(const std::shared_ptr<MultiNozzleUtils::NozzleGroupResultBase>& nozzle_group_result)
 {
@@ -2699,13 +2773,36 @@ void GCodeProcessor::initialize_from_context(const std::shared_ptr<MultiNozzleUt
 void GCodeProcessor::process_buffer(const std::string &buffer)
 {
     //FIXME maybe cache GCodeLine gline to be over multiple parse_buffer() invocations.
+    if (m_export_provenance)
+        m_export_provenance->begin_buffer(buffer);
     m_parser.parse_buffer(buffer, [this](GCodeReader&, const GCodeReader::GCodeLine& line) {
+        if (m_export_provenance)
+            m_export_provenance->begin_parser_record(line.raw());
         this->process_gcode_line(line, false);
+        if (m_export_provenance)
+            m_export_provenance->end_parser_record();
     });
+    if (m_export_provenance)
+        m_export_provenance->end_buffer();
 }
 
 void GCodeProcessor::finalize(bool post_process)
 {
+    finalize(post_process, nullptr);
+}
+
+void GCodeProcessor::finalize(bool post_process, NativeEmissionMap::Collector* emission)
+{
+    if (emission) {
+        if (!post_process)
+            throw std::logic_error("Native emission map requires both export rewrites");
+        emission->finish_capture();
+    }
+    if (m_export_provenance) {
+        if (!post_process)
+            throw std::logic_error("Native processor provenance requires both export rewrites");
+        m_export_provenance->finish_capture(m_result.moves.size());
+    }
     // update width/height of wipe moves
     for (GCodeProcessorResult::MoveVertex& move : m_result.moves) {
         if (move.type == EMoveType::Wipe) {
@@ -2744,7 +2841,10 @@ void GCodeProcessor::finalize(bool post_process)
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
     if (post_process){
         constexpr float inject_time_threshold = 0.f;
-        MultiNozzleUtils::LayeredNozzleGroupResult result = *std::dynamic_pointer_cast<MultiNozzleUtils::LayeredNozzleGroupResult>(m_nozzle_group_result);
+        const auto layered = std::dynamic_pointer_cast<MultiNozzleUtils::LayeredNozzleGroupResult>(m_nozzle_group_result);
+        if (!layered)
+            throw Slic3r::RuntimeError("Time estimator post process requires layered nozzle settings.");
+        MultiNozzleUtils::LayeredNozzleGroupResult result = *layered;
         TimeProcessContext context(
             m_used_filaments,
             m_filament_lists,
@@ -2765,7 +2865,7 @@ void GCodeProcessor::finalize(bool post_process)
             m_result.extruder_types,
             m_nozzle_diameter
         );
-        m_time_processor.post_process(m_result.filename, m_result.moves, m_result.lines_ends, context);
+        m_time_processor.post_process(m_result.filename, m_result.moves, m_result.lines_ends, context, m_export_provenance, emission);
     }
 
     m_result.pause_printing.clear();
@@ -2796,6 +2896,8 @@ void GCodeProcessor::finalize(bool post_process)
     update_preview_layers_times_stats();
     //BBS: update slice warning
     update_slice_warnings();
+    if (m_export_provenance)
+        m_export_provenance->finish(m_result.moves.size());
 }
 
 float GCodeProcessor::get_time(PrintEstimatedStatistics::ETimeMode mode) const
@@ -4115,7 +4217,7 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
             m_end_position[Z] = m_height;
 
         m_extruded_last_z = m_end_position[Z];
-        m_options_z_corrector.update(m_height);
+        m_options_z_corrector.update(m_height, m_export_provenance);
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         m_height_compare.update(m_height, m_extrusion_role);
@@ -4517,7 +4619,7 @@ void GCodeProcessor::process_VG1(const GCodeReader::GCodeLine& line)
             m_end_position[Z] = m_height;
 
         m_extruded_last_z = m_end_position[Z];
-        m_options_z_corrector.update(m_height);
+        m_options_z_corrector.update(m_height, m_export_provenance);
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         m_height_compare.update(m_height, m_extrusion_role);
@@ -4952,7 +5054,7 @@ void  GCodeProcessor::process_G2_G3(const GCodeReader::GCodeLine& line)
             m_end_position[Z] = m_height;
 
         m_extruded_last_z = m_end_position[Z];
-        m_options_z_corrector.update(m_height);
+        m_options_z_corrector.update(m_height, m_export_provenance);
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         m_height_compare.update(m_height, m_extrusion_role);
@@ -6029,6 +6131,22 @@ void GCodeProcessor::process_filament_change(int id, int nozzle_id)
     simulate_st_synchronize(extra_time, erFlush);
 }
 
+void GCodeProcessor::OptionsZCorrector::update(float height, NativeProcessorProvenance::Collector* provenance)
+{
+    if (!m_move_id.has_value() || !m_custom_gcode_per_print_z_id.has_value())
+        return;
+
+    const Vec3f position = m_result.moves.back().position;
+    GCodeProcessorResult::MoveVertex& move = m_result.moves.emplace_back(m_result.moves[*m_move_id]);
+    move.position = position;
+    move.height = height;
+    m_result.moves.erase(m_result.moves.begin() + *m_move_id);
+    if (provenance)
+        provenance->relocate_move(*m_move_id, m_result.moves.size() - 1);
+    m_result.custom_gcode_per_print_z[*m_custom_gcode_per_print_z_id].print_z = position.z();
+    reset();
+}
+
 void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type)
 {
     int filament_id = get_filament_id();
@@ -6076,6 +6194,19 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type)
         m_print_z,
         m_pa_line_calibration
     });
+
+    if (m_export_provenance) {
+        using NativeProcessorProvenance::MoveKind;
+        const size_t index = m_result.moves.size() - 1;
+        if (type == EMoveType::Seam) {
+            // The seam uses the previous native vertex as its geometric anchor.
+            const auto previous = m_export_provenance->move_at(index - 1).stable_id;
+            m_export_provenance->append_move(index, MoveKind::SyntheticPrevious, previous);
+        } else {
+            const bool event = type == EMoveType::Color_change || type == EMoveType::Pause_Print || type == EMoveType::Custom_GCode;
+            m_export_provenance->append_move(index, event ? MoveKind::SyntheticEvent : MoveKind::Observed);
+        }
+    }
 
     if (type == EMoveType::Seam) {
         m_seams_count++;

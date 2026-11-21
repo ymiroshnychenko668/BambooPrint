@@ -2595,6 +2595,33 @@ void Print::process(std::unordered_map<std::string, long long>* slice_time, bool
 // It is up to the caller to show an error message.
 std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
+    return this->export_gcode(path_template, result, std::move(thumbnail_cb), false);
+}
+
+std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map)
+{
+    return this->export_gcode(path_template, result, std::move(thumbnail_cb), native_processor_map, false);
+}
+
+std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map)
+{
+    return this->export_gcode(path_template, result, std::move(thumbnail_cb), native_processor_map, native_emission_map, false);
+}
+
+std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map,
+                                bool native_object_map)
+{
+    return this->export_gcode(path_template, result, std::move(thumbnail_cb), native_processor_map, native_emission_map,
+                            native_object_map, {});
+}
+
+std::string Print::export_gcode(const std::string& path_template, GCodeProcessorResult* result,
+                                ThumbnailsGeneratorCallback thumbnail_cb, bool native_processor_map, bool native_emission_map,
+                                bool native_object_map, const NativeObjectWitness::Options& object_witness)
+{
     // output everything to a G-code file
     // The following call may die if the filename_format template substitution fails.
     std::string path = this->output_filepath(path_template);
@@ -2613,7 +2640,8 @@ std::string Print::export_gcode(const std::string& path_template, GCodeProcessor
     //BBS: compute plate offset for gcode-generator
     const Vec3d origin = this->get_plate_origin();
     gcode.set_gcode_offset(origin(0), origin(1));
-    gcode.do_export(this, path.c_str(), result, thumbnail_cb);
+    gcode.do_export(this, path.c_str(), result, std::move(thumbnail_cb), native_processor_map, native_emission_map,
+                    native_object_map, object_witness);
     gcode.export_layer_filaments(result);
     //BBS
     if (result != nullptr) {

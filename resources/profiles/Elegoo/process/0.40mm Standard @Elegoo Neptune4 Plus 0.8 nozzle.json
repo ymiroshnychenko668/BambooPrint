@@ -9,6 +9,8 @@
     "bottom_shell_layers": "3",
     "outer_wall_line_width": "0.8",
     "line_width": "0.8",
+    "skin_infill_line_width": "0",
+    "skeleton_infill_line_width": "0",
     "initial_layer_line_width": "0.82",
     "sparse_infill_line_width": "0.85",
     "inner_wall_line_width": "0.85",

@@ -17,6 +17,7 @@
     #endif /* SLIC3R_GUI */
 #endif /* WIN32 */
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 #include <cstring>
@@ -50,6 +51,11 @@ using namespace nlohmann;
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/GCode/PostProcessor.hpp"
+#include "libslic3r/GCode/NativeProcessorMoveMap.hpp"
+#include "libslic3r/GCode/NativeEmissionMap.hpp"
+#include "libslic3r/GCode/NativeObjectMap.hpp"
+#include "libslic3r/GCode/NativeObjectWitness.hpp"
+#include "libslic3r/GCode/NativePreviewPublish.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/ModelArrange.hpp"
 #include "libslic3r/Platform.hpp"
@@ -1525,6 +1531,77 @@ static void load_downward_settings_list_from_config(std::string config_file, std
 
 int CLI::run(int argc, char **argv)
 {
+    const char* processor_probe = boost::nowide::getenv("CORVUS_NATIVE_PROCESSOR_PROBE");
+    const char* emission_probe = boost::nowide::getenv("CORVUS_NATIVE_EMISSION_PROBE");
+    const char* preview_probe = boost::nowide::getenv("CORVUS_NATIVE_PREVIEW_PROBE");
+    const char* object_probe = boost::nowide::getenv("CORVUS_NATIVE_OBJECT_PROBE_V2");
+    const char* map_opt_in = boost::nowide::getenv("CORVUS_NATIVE_PROCESSOR_MAP");
+    const char* emission_opt_in = boost::nowide::getenv("CORVUS_NATIVE_EMISSION_MAP");
+    const char* preview_opt_in = boost::nowide::getenv("CORVUS_NATIVE_PREVIEW_MAP");
+    const char* object_opt_in = boost::nowide::getenv("CORVUS_NATIVE_OBJECT_MAP");
+    const char* operation_opt_in = boost::nowide::getenv("CORVUS_NATIVE_OPERATION_DIAGNOSTIC");
+    const char* membership_opt_in = boost::nowide::getenv("CORVUS_NATIVE_OBJECT_MEMBERSHIP");
+    const char* writer_opt_in = boost::nowide::getenv("CORVUS_NATIVE_WRITER_OBSERVATIONS");
+    const unsigned probes = unsigned(processor_probe != nullptr) + unsigned(emission_probe != nullptr)
+        + unsigned(preview_probe != nullptr) + unsigned(object_probe != nullptr);
+    if (probes) {
+        if (argc != 2 || std::strcmp(argv[1], "--help") != 0 ||
+            probes != 1 || map_opt_in || emission_opt_in || preview_opt_in || object_opt_in ||
+            operation_opt_in || membership_opt_in || writer_opt_in)
+            return CLI_INVALID_PARAMS;
+        try {
+            if (processor_probe) Slic3r::NativeProcessorMoveMap::write_capability(processor_probe);
+            else if (emission_probe) Slic3r::NativeEmissionMap::write_capability(emission_probe);
+            else if (preview_probe) Slic3r::NativePreview::write_capability(preview_probe);
+            else Slic3r::NativeObjectMap::write_capability(object_probe);
+            return CLI_SUCCESS;
+        } catch (const std::exception& e) {
+            boost::nowide::cerr << e.what() << std::endl;
+            return CLI_ENVIRONMENT_ERROR;
+        }
+    }
+
+    const bool native_processor_map = map_opt_in && std::strcmp(map_opt_in, "1") == 0;
+    const bool native_emission_map = emission_opt_in && std::strcmp(emission_opt_in, "1") == 0;
+    const bool native_object_map = object_opt_in && std::strcmp(object_opt_in, "2") == 0;
+    if (map_opt_in && !native_processor_map) {
+        boost::nowide::cerr << "NATIVE_PROCESSOR_MAP_INVALID_OPT_IN" << std::endl;
+        return CLI_INVALID_PARAMS;
+    }
+    if (emission_opt_in && !native_emission_map) {
+        boost::nowide::cerr << "NATIVE_EMISSION_MAP_INVALID_OPT_IN" << std::endl;
+        return CLI_INVALID_PARAMS;
+    }
+    if (object_opt_in && !native_object_map) {
+        boost::nowide::cerr << "NATIVE_OBJECT_MAP_INVALID_OPT_IN" << std::endl;
+        return CLI_INVALID_PARAMS;
+    }
+    const bool witnesses = operation_opt_in || membership_opt_in || writer_opt_in;
+    if (witnesses && (!native_object_map || !operation_opt_in || std::strcmp(operation_opt_in, "1") != 0 ||
+        !membership_opt_in || std::strcmp(membership_opt_in, "1") != 0 || (writer_opt_in && std::strcmp(writer_opt_in, "1") != 0))) {
+        boost::nowide::cerr << "NATIVE_OBJECT_WITNESS_INVALID_OPT_IN" << std::endl;
+        return CLI_INVALID_PARAMS;
+    }
+    const Slic3r::NativeObjectWitness::Options object_witness{witnesses, writer_opt_in != nullptr};
+    if (preview_opt_in) {
+        const char* execution = boost::nowide::getenv("CORVUS_NATIVE_EXECUTION_SHA256");
+        if (std::strcmp(preview_opt_in, "1") != 0 || !native_processor_map || !execution ||
+            !Slic3r::NativePreview::valid_sha256(execution)) {
+            boost::nowide::cerr << "NATIVE_PREVIEW_INVALID_OPT_IN" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+    }
+    const bool native_evidence = native_processor_map || native_emission_map || native_object_map;
+    const char* native_evidence_error = native_processor_map ? "NATIVE_PROCESSOR_MAP"
+        : native_emission_map ? "NATIVE_EMISSION_MAP" : "NATIVE_OBJECT_MAP";
+#ifndef __linux__
+    if (native_evidence) {
+        boost::nowide::cerr << native_evidence_error << "_UNSUPPORTED_PLATFORM" << std::endl;
+        return CLI_INVALID_PARAMS;
+    }
+#endif
+    bool native_evidence_exported = false;
+
     // Mark the main thread for the debugger and for runtime checks.
     set_current_thread_name("bambustu_main");
     // Save the thread ID of the main thread.
@@ -1591,6 +1668,16 @@ int CLI::run(int argc, char **argv)
     {
         boost::nowide::cerr << "setup params error" << std::endl;
         return CLI_INVALID_PARAMS;
+    }
+    if (native_evidence) {
+        if (std::find(m_actions.begin(), m_actions.end(), "load_slicedata") != m_actions.end()) {
+            boost::nowide::cerr << native_evidence_error << "_UNSUPPORTED_CACHED_EXPORT" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
+        if (std::find(m_actions.begin(), m_actions.end(), "slice") == m_actions.end()) {
+            boost::nowide::cerr << native_evidence_error << "_REQUIRES_SLICE" << std::endl;
+            return CLI_INVALID_PARAMS;
+        }
     }
     BOOST_LOG_TRIVIAL(info) << "finished setup params, argc="<< argc << std::endl;
     std::string temp_path = wxFileName::GetTempDir().utf8_str().data();
@@ -6483,6 +6570,10 @@ int CLI::run(int argc, char **argv)
                 flush_and_exit(CLI_INVALID_PARAMS);
             }*/
         } else if (opt_key == "slice") {
+            if (native_evidence && printer_technology != ptFFF) {
+                boost::nowide::cerr << native_evidence_error << "_REQUIRES_FFF" << std::endl;
+                flush_and_exit(CLI_INVALID_PARAMS);
+            }
             //BBS: slice 0 means all plates, i means plate i;
             plate_to_slice = m_config.option<ConfigOptionInt>("slice")->value;
             sliced_plate = plate_to_slice;
@@ -7263,13 +7354,20 @@ int CLI::run(int argc, char **argv)
                                     BOOST_LOG_TRIVIAL(info) << "process finished, will export gcode temporily to " << outfile << std::endl;
                                     temp_time = Slic3r::Utils::get_current_milliseconds_time_monotonic();
                                     if (is_bbl_vendor_preset) {
-                                        outfile = print_fff->export_gcode(outfile, gcode_result, nullptr);
+                                        outfile = print_fff->export_gcode(outfile, gcode_result, nullptr, native_processor_map,
+                                            native_emission_map, native_object_map, object_witness);
                                     }
                                     else {
                                         if (!opengl_valid)
                                             opengl_valid = init_opengl_and_colors(model, colors);
-                                        outfile = opengl_valid ? print_fff->export_gcode(outfile, gcode_result, cli_generate_thumbnails) : print_fff->export_gcode(outfile, gcode_result, nullptr);
+                                        outfile = opengl_valid
+                                            ? print_fff->export_gcode(outfile, gcode_result, cli_generate_thumbnails, native_processor_map,
+                                                native_emission_map, native_object_map, object_witness)
+                                            : print_fff->export_gcode(outfile, gcode_result, nullptr, native_processor_map,
+                                                native_emission_map, native_object_map, object_witness);
                                     }
+                                    if (native_evidence)
+                                        native_evidence_exported = true;
                                     const long long export_gcode_time =
                                         Slic3r::Utils::get_current_milliseconds_time_monotonic() - temp_time;
                                     slice_time[TIME_USING_CACHE] += export_gcode_time;
@@ -8328,6 +8426,12 @@ int CLI::run(int argc, char **argv)
     if (plate_data_src.size() > 0)
     {
         release_PlateData_list(plate_data_src);
+    }
+
+    if (native_evidence && !native_evidence_exported) {
+        boost::nowide::cerr << native_evidence_error << "_EXPORT_MISSING" << std::endl;
+        record_exit_reson(outfile_dir, CLI_INVALID_PARAMS, 0, cli_errors[CLI_INVALID_PARAMS], sliced_info);
+        flush_and_exit(CLI_INVALID_PARAMS);
     }
 
 #if defined(__linux__) || defined(__LINUX__)
