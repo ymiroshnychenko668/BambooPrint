@@ -2,6 +2,8 @@
 
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Format/OBJ.hpp"
@@ -12,7 +14,6 @@
 
 #include <boost/nowide/cstdio.hpp>
 #include <boost/filesystem.hpp>
-#include <libslic3r/ModelArrange.hpp>
 
 using namespace std;
 
@@ -199,20 +200,28 @@ void init_print(std::vector<TriangleMesh> &&meshes, Slic3r::Print &print, Slic3r
 {
 	DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.apply(config_in);
+    if (Slic3r::resources_dir().empty()) {
+        const auto source = boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path();
+        Slic3r::set_resources_dir((source / "resources").string());
+    }
 
     if (verbose_gcode())
         config.set_key_value("gcode_comments", new ConfigOptionBool(true));
 
-    for (const TriangleMesh &t : meshes) {
-		ModelObject *object = model.add_object();
-		object->name += "object.stl";
-		object->add_volume(std::move(t));
-		object->add_instance();
-	}
-    arrange_objects(model, InfiniteBed{}, ArrangeParams{ scaled(min_object_distance(config))});
-	for (ModelObject *mo : model.objects) {
+    const BoundingBoxf bed(config.opt<ConfigOptionPoints>("printable_area")->values);
+    const double gap = min_object_distance(config);
+    double next_x = bed.min.x() + gap;
+    for (TriangleMesh &mesh : meshes) {
+        ModelObject *object = model.add_object();
+        object->name = "object.stl";
+        object->add_volume(std::move(mesh));
+        const BoundingBoxf3 bounds = object->raw_mesh_bounding_box();
+        object->add_instance()->set_offset(Vec3d(next_x - bounds.min.x(), bed.min.y() + gap - bounds.min.y(), 0));
+        next_x += bounds.size().x() + gap;
+    }
+    for (ModelObject *mo : model.objects) {
         mo->ensure_on_bed();
-		print.auto_assign_extruders(mo);
+        print.auto_assign_extruders(mo);
     }
 
 	print.apply(model, config);
@@ -282,14 +291,29 @@ void init_and_process_print(std::initializer_list<TriangleMesh> meshes, Slic3r::
 
 std::string gcode(Print & print)
 {
-	boost::filesystem::path temp = boost::filesystem::unique_path();
+    const auto temp = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+    ScopeGuard cleanup([&temp] { boost::nowide::remove(temp.string().c_str()); });
     print.set_status_silent();
     print.process();
-    print.export_gcode(temp.string(), nullptr, nullptr);
+    GCodeProcessorResult result;
+    print.export_gcode(temp.string(), &result, nullptr);
     std::ifstream t(temp.string());
-	std::string str((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());
-	boost::nowide::remove(temp.string().c_str());
-	return str;
+    return std::string(std::istreambuf_iterator<char>(t), std::istreambuf_iterator<char>());
+}
+
+std::set<double> extrusion_heights(const std::string &gcode, const std::string &feature)
+{
+    const std::string prefix = "; FEATURE: ";
+    bool active = false;
+    std::set<double> heights;
+    GCodeReader reader;
+    reader.parse_buffer(gcode, [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (line.raw().compare(0, prefix.size(), prefix) == 0)
+            active = line.raw().substr(prefix.size()) == feature;
+        else if (active && line.extruding(state) && line.dist_XY(state) > 0)
+            heights.insert(line.new_Z(state));
+    });
+    return heights;
 }
 
 Slic3r::Model model(const std::string &model_name, TriangleMesh &&_mesh)

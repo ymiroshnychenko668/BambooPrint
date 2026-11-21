@@ -4,6 +4,7 @@
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/log/trivial.hpp>
 #include <iostream>
+#include <string_view>
 #include <float.h>
 
 #if 0
@@ -15,6 +16,19 @@
 #include <assert.h>
 
 namespace Slic3r {
+
+static constexpr std::string_view extrude_speed_marker = ";_EXTRUDE_SET_SPEED";
+
+static size_t find_extrude_speed_marker(std::string_view line, size_t start = 0)
+{
+    for (size_t pos = line.find(extrude_speed_marker, start); pos != std::string_view::npos;
+         pos = line.find(extrude_speed_marker, pos + extrude_speed_marker.size())) {
+        const size_t next = line.find_first_not_of(" \t", pos + extrude_speed_marker.size());
+        if (next == std::string_view::npos || line[next] == ';' || line[next] == '\r' || line[next] == '\n')
+            return pos;
+    }
+    return std::string_view::npos;
+}
 
 GCodeEditor::GCodeEditor(GCode &gcodegen) : m_config(gcodegen.config()), m_toolchange_prefix(gcodegen.writer().toolchange_prefix()), m_current_extruder(0)
 {
@@ -209,7 +223,7 @@ std::vector<PerExtruderAdjustments> GCodeEditor::parse_layer_gcode(  const      
 
             if (wipe)
                 line.type |= CoolingLine::TYPE_WIPE;
-            if (boost::contains(sline, ";_EXTRUDE_SET_SPEED") && !wipe && !not_join_cooling) {
+            if (!wipe && !not_join_cooling && find_extrude_speed_marker(sline) != std::string_view::npos) {
                 line.type |= CoolingLine::TYPE_ADJUSTABLE;
                 active_speed_modifier = adjustment->lines.size();
             }
@@ -637,10 +651,14 @@ std::string GCodeEditor::write_layer_gcode(
             }
             // Process the rest of the line.
             if (end < line_end) {
-                if (line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE)) {
-                    // Process comments, remove ";_EXTRUDE_SET_SPEED", ";_EXTERNAL_PERIMETER", ";_WIPE"
+                // Consume the speed marker even on paths excluded from cooling slowdown.
+                size_t marker = find_extrude_speed_marker({end, size_t(line_end - end)});
+                if (marker != std::string_view::npos || (line->type & (CoolingLine::TYPE_EXTERNAL_PERIMETER | CoolingLine::TYPE_WIPE))) {
                     std::string comment(end, line_end);
-                    boost::replace_all(comment, ";_EXTRUDE_SET_SPEED", "");
+                    while (marker != std::string_view::npos) {
+                        comment.erase(marker, extrude_speed_marker.size());
+                        marker = find_extrude_speed_marker(comment, marker);
+                    }
                     if (line->type & CoolingLine::TYPE_EXTERNAL_PERIMETER)
                         boost::replace_all(comment, ";_EXTERNAL_PERIMETER", "");
                     if (line->type & CoolingLine::TYPE_WIPE)

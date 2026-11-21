@@ -8,6 +8,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <set>
 #include <unordered_map>
 
 namespace Slic3r { namespace Test {
@@ -74,6 +75,7 @@ void init_and_process_print(std::initializer_list<TestMesh> 	meshes, Slic3r::Pri
 void init_and_process_print(std::initializer_list<TriangleMesh> meshes, Slic3r::Print &print, std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> config_items, bool comments = false);
 
 std::string gcode(Print& print);
+std::set<double> extrusion_heights(const std::string &gcode, const std::string &feature);
 
 std::string slice(std::initializer_list<TestMesh> meshes, const DynamicPrintConfig &config, bool comments = false);
 std::string slice(std::initializer_list<TriangleMesh> meshes, const DynamicPrintConfig &config, bool comments = false);
