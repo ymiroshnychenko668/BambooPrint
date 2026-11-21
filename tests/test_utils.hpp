@@ -1,6 +1,8 @@
 #ifndef SLIC3R_TEST_UTILS
 #define SLIC3R_TEST_UTILS
 
+#include <stdexcept>
+
 #include <libslic3r/TriangleMesh.hpp>
 #include <libslic3r/Format/OBJ.hpp>
 
@@ -14,7 +16,10 @@ inline Slic3r::TriangleMesh load_model(const std::string &obj_filename)
 {
     Slic3r::TriangleMesh mesh;
     auto fpath = TEST_DATA_DIR PATH_SEPARATOR + obj_filename;
-    Slic3r::load_obj(fpath.c_str(), &mesh);
+    Slic3r::ObjInfo info;
+    std::string message;
+    if (!Slic3r::load_obj(fpath.c_str(), &mesh, info, message))
+        throw std::runtime_error("Cannot load OBJ fixture " + fpath + ": " + message);
     return mesh;
 }
 

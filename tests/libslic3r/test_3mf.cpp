@@ -51,15 +51,15 @@ SCENARIO("Export+Import geometry to/from 3mf file cycle", "[3mf]") {
 
         WHEN("model is saved+loaded to/from 3mf file") {
             // save the model to 3mf file
-            std::string test_file = std::string(TEST_DATA_DIR) + "/test_3mf/prusa.3mf";
-            store_3mf(test_file.c_str(), &src_model, nullptr, false);
+            const std::string test_file = (boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("prusa-%%%%-%%%%.3mf")).string();
+            REQUIRE(store_3mf(test_file.c_str(), &src_model, nullptr, false));
 
             // load back the model from the 3mf file
             Model dst_model;
             DynamicPrintConfig dst_config;
             {
                 ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
-                load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false);
+                REQUIRE(load_3mf(test_file.c_str(), dst_config, ctxt, &dst_model, false));
             }
             boost::filesystem::remove(test_file);
 
@@ -94,25 +94,27 @@ SCENARIO("2D convex hull of sinking object", "[3mf]") {
 
             // set instance's attitude so that it is rotated, scaled and sinking
             ModelInstance* instance = object->instances.front();
-            instance->set_rotation(X, -M_PI / 4.0);
+            instance->set_rotation({ -M_PI / 4.0, 0.0, 0.0 });
             instance->set_offset(Vec3d::Zero());
             instance->set_scaling_factor({ 2.0, 2.0, 2.0 });
 
             // calculate 2D convex hull
-            Polygon hull_2d = object->convex_hull_2d(instance->get_transformation().get_matrix());
+            const ModelVolume &volume = *object->volumes.front();
+            const Transform3f transform = (instance->get_matrix() * volume.get_matrix()).cast<float>();
+            Polygon hull_2d = its_convex_hull_2d_above(volume.mesh().its, transform, 0.f);
 
             // verify result
             Points result = {
-                { -91501496, -15914144 },
-                { 91501496, -15914144 },
-                { 91501496, 4243 },
-                { 78229680, 4246883 },
-                { 56898100, 4246883 },
-                { -85501496, 4242641 },
-                { -91501496, 4243 }
+                Point::new_scale(-91.501496, -15.914144),
+                Point::new_scale(91.501496, -15.914144),
+                Point::new_scale(91.501496, 0.004243),
+                Point::new_scale(78.229680, 4.246883),
+                Point::new_scale(56.898100, 4.246883),
+                Point::new_scale(-85.501496, 4.242641),
+                Point::new_scale(-91.501496, 0.004243)
             };
 
-            // Allow 1um error due to floating point rounding.
+            // Allow one scaled coordinate unit for floating-point rounding.
             bool res = hull_2d.points.size() == result.size();
             if (res)
                 for (size_t i = 0; i < result.size(); ++ i) {
