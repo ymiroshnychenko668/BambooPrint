@@ -29,6 +29,11 @@ jobs:
         with:
           lfs: 'true'
 
+      - name: Set up pinned CMake
+        if: runner.os == 'macOS' || inputs.os == 'ubuntu-26.04'
+        shell: bash
+        run: bash .github/scripts/setup-build-cmake.sh
+
       - name: load cached deps
         uses: actions/cache@v5
         with:
@@ -79,12 +84,6 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install automake texinfo
-          brew unlink cmake || true
-          brew tap-new $USER/old-cmake
-          brew extract --version=3.31.0 cmake $USER/old-cmake
-          brew install $USER/old-cmake/cmake@3.31.0
-          brew link --overwrite cmake@3.31.0
-          brew pin cmake@3.31.0
           ./BuildMac.sh -s -x -a x86_64 -t 10.15 -1
 
       - name: Build slicer mac
@@ -92,12 +91,6 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           brew install automake texinfo
-          brew unlink cmake || true
-          brew tap-new $USER/old-cmake
-          brew extract --version=3.31.0 cmake $USER/old-cmake
-          brew install $USER/old-cmake/cmake@3.31.0
-          brew link --overwrite cmake@3.31.0
-          brew pin cmake@3.31.0
           ./BuildMac.sh -s -x -a universal -t 10.15 -1
 
       - name: pack mac app

@@ -12,6 +12,7 @@ on:
      - 'bbl/**'
      - 'resources/**'
      - ".github/workflows/build_*.yml"
+     - ".github/scripts/setup-build-cmake.sh"
 
   pull_request:
     branches:
@@ -22,6 +23,7 @@ on:
      - '**/CMakeLists.txt'
      - 'version.inc'
      - ".github/workflows/build_*.yml"
+     - ".github/scripts/setup-build-cmake.sh"
      - 'BuildLinux.sh'
      - 'build_win.bat'
     
