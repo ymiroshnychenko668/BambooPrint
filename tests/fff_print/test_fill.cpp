@@ -57,7 +57,7 @@ TEST_CASE("Fill: adjusted solid distance") {
 #endif
 
 TEST_CASE("Fill: Pattern Path Length", "[Fill]") {
-    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("rectilinear"));
+    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type(ipRectilinear));
     filler->angle = float(-(PI)/2.0);
 	FillParams fill_params;
 	filler->spacing = 5;
@@ -139,7 +139,9 @@ TEST_CASE("Fill: Pattern Path Length", "[Fill]") {
         filler->z = 20.15;
 
         Slic3r::Points points {Point(25771516,14142125),Point(14142138,25771515),Point(2512749,14142131),Point(14142125,2512749)};
-        Slic3r::Polylines paths = test(Slic3r::ExPolygon(points));
+        Slic3r::ExPolygon polygon(points);
+        polygon.scale(1e-6 / SCALING_FACTOR); // Regression coordinates were recorded in nanometres.
+        Slic3r::Polylines paths = test(polygon);
         REQUIRE(paths.size() == 1); // one continuous path
 
         // TODO: determine what the "Expected length" should be for rectilinear fill of a 100x100 polygon. 
@@ -151,7 +153,7 @@ TEST_CASE("Fill: Pattern Path Length", "[Fill]") {
     SECTION("Rotated Square") {
         Slic3r::Points square { Point::new_scale(0,0), Point::new_scale(50,0), Point::new_scale(50,50), Point::new_scale(0,50)};
         Slic3r::ExPolygon expolygon(square);
-        std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("rectilinear"));
+        std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type(ipRectilinear));
 		filler->bounding_box = get_extents(expolygon.contour);
         filler->angle = 0;
         
@@ -206,6 +208,7 @@ TEST_CASE("Fill: Pattern Path Length", "[Fill]") {
                 Slic3r::Point(59515153,20697500),Slic3r::Point(58502480,20697500),Slic3r::Point(58502480,5422499)
         };
         Slic3r::ExPolygon expolygon(points);
+        expolygon.scale(1e-6 / SCALING_FACTOR); // Preserve the physical size of the archived outline.
          
         REQUIRE(test_if_solid_surface_filled(expolygon, 0.55) == true);
         REQUIRE(test_if_solid_surface_filled(expolygon, 0.55, PI/2.0) == true);
@@ -461,7 +464,7 @@ for my $pattern (qw(rectilinear honeycomb hilbertcurve concentric)) {
 
 bool test_if_solid_surface_filled(const ExPolygon& expolygon, double flow_spacing, double angle, double density)
 {
-    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type("rectilinear"));
+    std::unique_ptr<Slic3r::Fill> filler(Slic3r::Fill::new_from_type(ipRectilinear));
 	filler->bounding_box = get_extents(expolygon.contour);
     filler->angle = float(angle);
 
@@ -689,11 +692,6 @@ static double mean_nearest_angle_gap(const std::vector<double> &a0, const std::v
     if (nearest.empty())
         return 0.;
     return std::accumulate(nearest.begin(), nearest.end(), 0.) / double(nearest.size());
-}
-
-static bool polyline_is_closed(const Polyline &pl)
-{
-    return pl.size() >= 4 && (pl.front() - pl.back()).cast<double>().norm() < double(scale_(0.6));
 }
 
 static bool polylines_have_interior_crossing(const Polylines &pls)
@@ -1265,7 +1263,7 @@ TEST_CASE("Fill: conformal CrossZag Alternate starts inward on odd layers", "[Fi
     REQUIRE(lean0 * lean1 < 0.);
 }
 
-TEST_CASE("Fill: conformal orthogonal uses offset loops on odd layers", "[Fill][Conformal]") {
+TEST_CASE("Fill: legacy conformal orthogonal matches unstaggered infill on odd and even layers", "[Fill][Conformal]") {
     ExPolygon disk;
     disk.contour = make_regular_ngon(20., 48);
     const BoundingBox obj_bb = get_extents(disk);
@@ -1276,11 +1274,8 @@ TEST_CASE("Fill: conformal orthogonal uses offset loops on odd layers", "[Fill][
     dump_conformal_overlay("cylinder_orthogonal", disk, even_paths, odd_paths);
 
     REQUIRE(count_long_segment_angle_bins(even_paths, 2.0, 20.0) >= 4);
-    size_t closed = 0;
-    for (const Polyline &pl : odd_paths)
-        if (polyline_is_closed(pl))
-            ++closed;
-    REQUIRE(closed >= 1);
+    REQUIRE(even_paths == fill_conformal(disk, 0, ConformalStagger::None, obj_bb, false));
+    REQUIRE(odd_paths == fill_conformal(disk, 1, ConformalStagger::None, obj_bb, false));
 }
 
 TEST_CASE("Fill: conformal cone keeps the same headings", "[Fill][Conformal]") {

@@ -138,8 +138,8 @@ SCENARIO( "TriangleMesh: slice behavior.") {
     GIVEN( "A 20mm cube with one corner on the origin") {
         auto cube = make_cube();
         
-        WHEN("Cube is sliced with z = [0+EPSILON,2,4,8,6,8,10,12,14,16,18,20]") {
-            std::vector<double> z { 0+EPSILON,2,4,8,6,8,10,12,14,16,18,20 };
+        WHEN("Cube is sliced with z = [EPSILON,2,4,6,8,10,12,14,16,18,20]") {
+            std::vector<double> z { EPSILON,2,4,6,8,10,12,14,16,18,20 };
 			std::vector<ExPolygons> result = cube.slice(z);
             THEN( "The correct number of polygons are returned per layer.") {
                 for (size_t i = 0U; i < z.size(); i++) {
@@ -148,7 +148,7 @@ SCENARIO( "TriangleMesh: slice behavior.") {
             }
             THEN( "The area of the returned polygons is correct.") {
                 for (size_t i = 0U; i < z.size(); i++) {
-                    REQUIRE(result.at(i).at(0).area() == 20.0*20/(std::pow(SCALING_FACTOR,2)));
+                    REQUIRE(result.at(i).at(0).area() == Approx(std::pow(20. / SCALING_FACTOR, 2)));
                 }
             }
         }
@@ -157,18 +157,18 @@ SCENARIO( "TriangleMesh: slice behavior.") {
         const std::vector<Vec3f> vertices {{0,0,0},{0,0,20},{0,5,0},{0,5,20},{50,0,0},{50,0,20},{15,5,0},{35,5,0},{15,20,0},{50,5,0},{35,20,0},{15,5,10},{50,5,20},{35,5,10},{35,20,10},{15,20,10}};
         const std::vector<Vec3i> facets {{0,1,2},{2,1,3},{1,0,4},{5,1,4},{0,2,4},{4,2,6},{7,6,8},{4,6,7},{9,4,7},{7,8,10},{2,3,6},{11,3,12},{7,12,9},{13,12,7},{6,3,11},{11,12,13},{3,1,5},{12,3,5},{5,4,9},{12,5,9},{13,7,10},{14,13,10},{8,15,10},{10,15,14},{6,11,8},{8,11,15},{15,11,13},{14,15,13}};
 
-		auto cube = make_cube();
+		TriangleMesh mesh(vertices, facets);
         WHEN(" a top tangent plane is sliced") {
             // At Z = 10 we have a top horizontal surface.
-			std::vector<ExPolygons> slices = cube.slice({5.0, 10.0});
+			std::vector<ExPolygons> slices = mesh.slice({5.0, 10.0});
             THEN( "its area is included") {
                 REQUIRE(slices.at(0).at(0).area() > 0);
                 REQUIRE(slices.at(1).at(0).area() > 0);
             }
         }
         WHEN(" a model that has been transformed is sliced") {
-            cube.mirror_z();
-			std::vector<ExPolygons> slices = cube.slice({-5.0, -10.0});
+            mesh.mirror_z();
+			std::vector<ExPolygons> slices = mesh.slice({-10.0, -5.0});
             THEN( "it is sliced properly (mirrored bottom plane area is included)") {
                 REQUIRE(slices.at(0).at(0).area() > 0);
                 REQUIRE(slices.at(1).at(0).area() > 0);

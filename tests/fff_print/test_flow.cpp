@@ -1,13 +1,11 @@
 #include <catch2/catch.hpp>
 
-#include <numeric>
-#include <sstream>
+#include <map>
 
 #include "test_data.hpp" // get access to init_print, etc
 
 #include "libslic3r/Config.hpp"
 #include "libslic3r/Model.hpp"
-#include "libslic3r/Config.hpp"
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/libslic3r.h"
@@ -16,44 +14,61 @@ using namespace Slic3r::Test;
 using namespace Slic3r;
 
 SCENARIO("Extrusion width specifics", "[Flow]") {
-    GIVEN("A config with a skirt, brim, some fill density, 3 perimeters, and 1 bottom solid layer and a 20mm cube mesh") {
-        // this is a sharedptr
-        DynamicPrintConfig config = Slic3r::DynamicPrintConfig::full_print_config();
-		config.set_deserialize_strict({
-			{ "brim_width",			2 },
-			{ "skirts",				1 },
-			{ "perimeters",			3 },
-			{ "fill_density",		"40%" },
-			{ "first_layer_height", 0.3 }
-			});
+    GIVEN("A 20mm cube with a skirt, brim, walls and bottom infill") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({
+            { "skirt_loops", 1 }, { "brim_type", "outer_only" }, { "brim_width", 3 },
+            { "wall_loops", 3 }, { "wall_generator", "classic" }, { "sparse_infill_density", 40 },
+            { "initial_layer_print_height", 0.3 }, { "layer_height", 0.2 },
+            { "outer_wall_line_width", 0.4 }, { "filament_diameter", 1.75 },
+            { "filament_flow_ratio", 1 }, { "initial_layer_flow_ratio", 1 }, { "enable_arc_fitting", false }
+        });
 
-        WHEN("first layer width set to 2mm") {
-            Slic3r::Model model;
-            config.set("first_layer_extrusion_width", 2);
-            Slic3r::Print print;
-            Slic3r::Test::init_print({TestMesh::cube_20x20x20}, print, model, config);
+        WHEN("First layer line width is set to 0.8mm") {
+            config.set("initial_layer_line_width", 0.8);
+            const double first_z = config.opt_float("initial_layer_print_height");
+            const double next_z = first_z + config.opt_float("layer_height");
+            struct Extrusion {
+                double filament = 0;
+                double travel = 0;
+            };
+            std::map<std::string, Extrusion> first_layer, next_layer;
+            std::string feature;
+            const std::string feature_tag = "; FEATURE: ";
+            GCodeReader reader;
+            reader.apply_config(config);
+            reader.parse_buffer(Test::slice({TestMesh::cube_20x20x20}, config),
+                [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+                    if (line.raw().compare(0, feature_tag.size(), feature_tag) == 0)
+                        feature = line.raw().substr(feature_tag.size());
+                    if (!line.extruding(state) || line.dist_XY(state) == 0)
+                        return;
+                    const double z = line.new_Z(state);
+                    if (z != Approx(first_z) && z != Approx(next_z))
+                        return;
+                    Extrusion &extrusion = (z == Approx(first_z) ? first_layer : next_layer)[feature];
+                    extrusion.filament += line.dist_E(state);
+                    extrusion.travel += line.dist_XY(state);
+                });
 
-            std::vector<double> E_per_mm_bottom;
-            std::string gcode = Test::gcode(print);
-            Slic3r::GCodeReader parser;
-            const double layer_height = config.opt_float("layer_height");
-            parser.parse_buffer(gcode, [&E_per_mm_bottom, layer_height] (Slic3r::GCodeReader& self, const Slic3r::GCodeReader::GCodeLine& line)
-            { 
-                if (self.z() == Approx(layer_height).margin(0.01)) { // only consider first layer
-                    if (line.extruding(self) && line.dist_XY(self) > 0) {
-                        E_per_mm_bottom.emplace_back(line.dist_E(self) / line.dist_XY(self));
-                    }
+            const double filament_area = PI * std::pow(1.75 / 2., 2);
+            THEN("First layer width applies to each feature on the first layer") {
+                REQUIRE(first_layer.count("Skirt") == 1);
+                REQUIRE(first_layer.count("Brim") == 1);
+                REQUIRE(first_layer.count("Outer wall") == 1);
+                REQUIRE(first_layer.count("Bottom surface") == 1);
+                const double expected = Flow(0.8f, first_z, 0.4f).mm3_per_mm();
+                for (const auto &[role, extrusion] : first_layer) {
+                    CAPTURE(role);
+                    // Solid infill adjusts its spacing to fit the island.
+                    CHECK(extrusion.filament * filament_area / extrusion.travel == Approx(expected).epsilon(0.05));
                 }
-            });
-            THEN(" First layer width applies to everything on first layer.") {
-                bool pass = false;
-                double avg_E = std::accumulate(E_per_mm_bottom.cbegin(), E_per_mm_bottom.cend(), 0.0) / static_cast<double>(E_per_mm_bottom.size());
-
-                pass = (std::count_if(E_per_mm_bottom.cbegin(), E_per_mm_bottom.cend(), [avg_E] (const double& v) { return v == Approx(avg_E); }) == 0);
-                REQUIRE(pass == true);
-                REQUIRE(E_per_mm_bottom.size() > 0); // make sure it actually passed because of extrusion
             }
-            THEN(" First layer width does not apply to upper layer.") {
+            THEN("First layer width does not apply to the outer wall on the next layer") {
+                REQUIRE(next_layer.count("Outer wall") == 1);
+                const Extrusion &wall = next_layer.at("Outer wall");
+                const double expected = Flow(0.4f, next_z - first_z, 0.4f).mm3_per_mm();
+                REQUIRE(wall.filament * filament_area / wall.travel == Approx(expected).epsilon(0.001));
             }
         }
     }
