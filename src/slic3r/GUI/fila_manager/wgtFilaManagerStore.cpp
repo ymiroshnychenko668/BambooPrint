@@ -1,6 +1,6 @@
 #include "wgtFilaManagerStore.h"
 #include "libslic3r/Utils.hpp"
-#include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/DeviceCore/DevTrayLabel.h"
 
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
@@ -80,7 +80,7 @@ nlohmann::json FilamentSpool::to_json() const
             if (ams_id < 0 || slot_id.empty()) return {};
             try {
                 int tray_id = ams_id * 4 + std::stoi(slot_id);
-                return wxGetApp().transition_tridid(tray_id).ToStdString();
+                return filament_tray_label(tray_id);
             } catch (...) { return {}; }
         }()}
     };

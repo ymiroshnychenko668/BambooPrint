@@ -781,6 +781,11 @@ endif()
 
 target_include_directories(libslic3r_gui PRIVATE Utils)
 target_include_directories(libslic3r_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../)
+# Public GUI headers expose wxWidgets types to consumers outside the src directory.
+target_include_directories(libslic3r_gui SYSTEM INTERFACE ${wxWidgets_INCLUDE_DIRS})
+target_compile_definitions(libslic3r_gui INTERFACE ${wxWidgets_DEFINITIONS}
+    "$<$<CONFIG:Debug>:${wxWidgets_DEFINITIONS_DEBUG}>")
+target_compile_options(libslic3r_gui INTERFACE ${wxWidgets_CXX_FLAGS})
 
 if (WIN32)
     target_include_directories(libslic3r_gui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../../deps/WebView2/include)

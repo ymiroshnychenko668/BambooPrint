@@ -9,9 +9,24 @@
 
 #include <catch_main.hpp>
 
+#include "slic3r/GUI/DeviceCore/DevTrayLabel.h"
 #include "slic3r/GUI/fila_manager/wgtFilaManagerStore.h"
 
 using namespace Slic3r::GUI;
+
+TEST_CASE("Filament spool tray labels do not require a running GUI", "[fila_manager]")
+{
+    FilamentSpool spool;
+    CHECK(spool.to_json().at("tray_label").get<std::string>().empty());
+    for (const auto &example : std::vector<std::pair<int, std::string>>{
+             {0, "A1"}, {5, "B2"}, {26, "Q3"}, {131, "HT-D"}, {255, "Ext"}, {516, "B"}}) {
+        spool.ams_id = example.first / 4;
+        spool.slot_id = std::to_string(example.first % 4);
+        CHECK(spool.to_json().at("tray_label").get<std::string>() == example.second);
+    }
+    CHECK(filament_tray_label(VIRTUAL_TRAY_MAIN_ID, 2) == "Ext-R");
+    CHECK(filament_tray_label(VIRTUAL_TRAY_DEPUTY_ID, 2) == "Ext-L");
+}
 
 // Smoke test: keep at least one TEST_CASE so the binary is non-empty even
 // before STUDIO-17977 Task 1 lands its [colors] cases. Verifies that the

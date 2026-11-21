@@ -1,5 +1,6 @@
 #include "libslic3r/Technologies.hpp"
 #include "GUI_App.hpp"
+#include "DeviceCore/DevTrayLabel.h"
 #include "BindDialog.hpp"
 #include "GUI_Init.hpp"
 #include "Studio.hpp"
@@ -4786,40 +4787,7 @@ void GUI_App::load_gcode(wxWindow* parent, wxString& input_file) const
 
 wxString GUI_App::transition_tridid(int trid_id, std::optional<int> total_extruder_count) const
 {
-    if (trid_id == VIRTUAL_TRAY_MAIN_ID || trid_id == VIRTUAL_TRAY_DEPUTY_ID) {
-        if (total_extruder_count.value_or(-1) == 2) {
-            if (trid_id == VIRTUAL_TRAY_MAIN_ID) {
-                return wxString("Ext-R");
-            } else {
-                return wxString("Ext-L");
-            }
-        }
-        return wxString("Ext");
-    }
-
-    wxString maping_dict[] = { "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z" };
-
-    if (trid_id >= 128 * 4) {
-        trid_id -= 128 * 4;
-        int id_index = trid_id / 4;
-        return wxString::Format("%s", maping_dict[id_index]);
-    }
-    else if (trid_id >= 0x80 && trid_id <= 0x87) { // n3s
-        const char base = 'A' + (trid_id - 128);
-        wxString prefix("HT-");
-        prefix.append(base);
-        return prefix;
-    }
-    else if (trid_id >= 24 && trid_id <= 27 )
-    {
-        int id_suffix = trid_id - 24 + 1;//ams lite for n9 trid_id start from 24
-        return wxString::Format("Q%d", id_suffix);
-    }
-    else {
-        int id_index = std::clamp((int)ceil(trid_id / 4), 0, 25);
-        int id_suffix = trid_id % 4 + 1;
-        return wxString::Format("%s%d", maping_dict[id_index], id_suffix);
-    }
+    return wxString::FromUTF8(filament_tray_label(trid_id, total_extruder_count));
 }
 
 //BBS
