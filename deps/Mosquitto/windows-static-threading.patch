@@ -1,0 +1,11 @@
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -140,3 +140,7 @@
+ endif (WITH_STATIC_LIBRARIES)
+-
++
++if(WIN32 AND WITH_THREADING AND WITH_STATIC_LIBRARIES)
++    target_link_libraries(libmosquitto_static PThreads4W::PThreads4W)
++endif()
++
+ install(FILES ../include/mosquitto.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")

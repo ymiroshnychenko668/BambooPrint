@@ -779,7 +779,16 @@ function(bambustudio_copy_dlls target config postfix output_dlls)
             ${CMAKE_PREFIX_PATH}/bin/avutil-59.dll
          DESTINATION ${_out_dir})
 
+    set(_mqtt_dlls)
+    foreach(dll IN ITEMS mosquitto.dll pthreadVC3.dll)
+        if(EXISTS "${CMAKE_PREFIX_PATH}/bin/${dll}")
+            file(COPY "${CMAKE_PREFIX_PATH}/bin/${dll}" DESTINATION "${_out_dir}")
+            list(APPEND _mqtt_dlls "${_out_dir}/${dll}")
+        endif()
+    endforeach()
+
     set(${output_dlls}
+        ${_mqtt_dlls}
         ${_out_dir}/${output_gmpdll}
         ${_out_dir}/${output_mpfrdll}
         ${_out_dir}/WebView2Loader.dll
