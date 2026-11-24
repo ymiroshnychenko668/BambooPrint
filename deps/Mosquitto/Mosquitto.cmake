@@ -17,7 +17,7 @@ set(_mosquitto_platform_flags
 )
 
 if (WIN32)
-    set(_mosquitto_patch PATCH_COMMAND ${GIT_EXECUTABLE} --git-dir=. --work-tree=. apply --ignore-space-change --whitespace=fix
+    set(_mosquitto_patch PATCH_COMMAND git --git-dir=. --work-tree=. apply
         ${CMAKE_CURRENT_LIST_DIR}/windows-static-threading.patch)
     if (MOSQUITTO_VCPKG_TOOLCHAIN)
         list(APPEND _mosquitto_platform_flags "-DCMAKE_TOOLCHAIN_FILE:FILEPATH=${MOSQUITTO_VCPKG_TOOLCHAIN}")
