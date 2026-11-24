@@ -1,12 +1,12 @@
 #include "NativeObjectWitness.hpp"
 
 #include <algorithm>
-#include <array>
-#include <charconv>
 #include <cmath>
 #include <limits>
+#include <locale>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
@@ -57,11 +57,12 @@ std::string hexadecimal(std::string_view bytes) {
     return out;
 }
 std::string decimal(double value) {
-    std::array<char, 32> text{};
-    const auto result = std::to_chars(text.data(), text.data() + text.size(), value, std::chars_format::general,
-                                      std::numeric_limits<double>::max_digits10);
-    require(result.ec == std::errc{}, "NATIVE_OBJECT_WITNESS_DELTA");
-    return {text.data(), result.ptr};
+    std::ostringstream text;
+    text.imbue(std::locale::classic());
+    text.precision(std::numeric_limits<double>::max_digits10);
+    text << value;
+    require(static_cast<bool>(text), "NATIVE_OBJECT_WITNESS_DELTA");
+    return text.str();
 }
 
 } // namespace

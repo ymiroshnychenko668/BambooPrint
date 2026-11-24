@@ -1,11 +1,18 @@
 #include "libslic3r/GCode/NativeObjectWitness.hpp"
 
 #include <cassert>
+#include <locale>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 
 using namespace Slic3r::NativeObjectWitness;
+
+namespace {
+class DecimalComma : public std::numpunct<char> {
+    char do_decimal_point() const override { return ','; }
+};
+}
 
 int main() {
     Collector witness(true);
@@ -29,7 +36,10 @@ int main() {
         return nlohmann::json::parse(text);
     };
     const auto membership = read(Collector::Document::Membership), audit = read(Collector::Document::Audit);
-    const auto operation = read(Collector::Document::Operation), writer = read(Collector::Document::Writer);
+    const auto operation = read(Collector::Document::Operation);
+    const auto original_locale = std::locale::global(std::locale(std::locale::classic(), new DecimalComma));
+    const auto writer = read(Collector::Document::Writer);
+    std::locale::global(original_locale);
     assert(membership["events"].size() == 3 && audit["events"].size() == 3 && writer["events"].size() == 3);
     assert(membership["events"][0]["begin"] == std::to_string(start) &&
         membership["events"][1]["begin"] == std::to_string(start + move.size()));
@@ -39,6 +49,8 @@ int main() {
         operation["roots"][2]["begin"] == std::to_string(batch.size()));
     assert(operation["edges"].empty() && operation["spans"][0]["relation"] == "UNATTRIBUTED");
     assert(writer["events"][1]["forceNoExtrusion"] == true && writer["events"][2]["writerKind"] == "ARC_CCW");
+    assert(writer["events"][0]["requestedDelta"] == "0.25" && writer["events"][1]["requestedDelta"] == "0");
+    assert(writer["events"][2]["requestedDelta"] == "0.050000000000000003");
     assert(!writer["events"][0].contains("positiveCommand"));
 
     Collector integrity(false);
