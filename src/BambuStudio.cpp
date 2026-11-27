@@ -91,6 +91,9 @@ using namespace nlohmann;
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/GuiColor.hpp"
 #include <GLFW/glfw3.h>
+#ifdef __linux__
+#include "CliThumbnailContext.hpp"
+#endif
 
 #ifdef __WXGTK__
 #include <X11/Xlib.h>
@@ -1805,7 +1808,7 @@ int CLI::run(int argc, char **argv)
     std::map<size_t, bool> orients_requirement;
     std::vector<Preset*> project_presets;
     std::vector<NozzleVolumeType> current_nozzle_volume_type, new_nozzle_volume_type;
-    std::string new_printer_name, current_printer_name, new_process_name, current_process_name, current_printer_system_name, current_process_system_name, new_process_system_name, new_printer_system_name, printer_model_id, current_printer_model, printer_model, new_default_process_name;
+    std::string new_printer_name, current_printer_name, new_process_name, current_process_name, current_printer_system_name, current_process_system_name, new_process_system_name, new_printer_system_name, current_printer_model, printer_model, new_default_process_name;
     std::vector<std::string> upward_compatible_printers, new_print_compatible_printers, current_print_compatible_printers, current_different_settings;
     std::vector<std::string> current_filaments_name, current_filaments_system_name, converted_filaments_system_name, current_inherits_group, current_extruder_variants, new_extruder_variants, current_print_extruder_variants, new_printer_extruder_variants;
     DynamicPrintConfig load_process_config, load_machine_config;
@@ -2478,28 +2481,14 @@ int CLI::run(int argc, char **argv)
             }
             config.set("printer_settings_id", new_printer_name, true);
 
-            //get printer_model_id
             printer_model = config.option<ConfigOptionString>("printer_model", true)->value;
-            if (!printer_model.empty()) {
-                std::string printer_model_path = resources_dir() + "/profiles/BBL/machine_full/"+printer_model+".json";
-                if (boost::filesystem::exists(printer_model_path))
-                {
-                    std::map<std::string, std::string> key_values;
-
-                    load_key_values_from_json(printer_model_path, key_values);
-                    if (key_values.find("model_id") != key_values.end()) {
-                        printer_model_id = key_values["model_id"];
-                        BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
-                    }
-                }
-            }
             //new_default_process_name
             if (config.option<ConfigOptionString>("default_print_profile"))
                 new_default_process_name = config.option<ConfigOptionString>("default_print_profile")->value;
 
             //printer_inherits = config.option<ConfigOptionString>("inherits", true)->value;
             load_machine_config = std::move(config);
-            BOOST_LOG_TRIVIAL(info) << boost::format("loaded machine config %1%, type %2%, name %3%, inherits %4%, printer_model_id %5%")%file %config_name %config_from % new_printer_system_name %printer_model_id;
+            BOOST_LOG_TRIVIAL(info) << boost::format("loaded machine config %1%, type %2%, name %3%, inherits %4%")%file %config_name %config_from % new_printer_system_name;
         }
         else if (config_type == "process") {
             if (!new_process_name.empty()) {
@@ -2795,21 +2784,7 @@ int CLI::run(int argc, char **argv)
                     {
                         config.set("printer_settings_id", config_name, true);
 
-                        //get printer_model_id
                         printer_model = config.option<ConfigOptionString>("printer_model", true)->value;
-                        if (!printer_model.empty()) {
-                            std::string printer_model_path = resources_dir() + "/profiles/BBL/machine_full/"+printer_model+".json";
-                            if (boost::filesystem::exists(printer_model_path))
-                            {
-                                std::map<std::string, std::string> key_values;
-
-                                load_key_values_from_json(printer_model_path, key_values);
-                                if (key_values.find("model_id") != key_values.end()) {
-                                    printer_model_id = key_values["model_id"];
-                                    BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
-                                }
-                            }
-                        }
 
                         int orig_printable_width = 0, orig_printable_depth = 0, orig_printable_height = 0;
                         Pointfs orig_printable_area;
@@ -2876,21 +2851,7 @@ int CLI::run(int argc, char **argv)
                     upward_compatible_printers = config.option<ConfigOptionStrings>("upward_compatible_machine", true)->values;
                     config.set("printer_settings_id", config_name, true);
 
-                    //get printer_model_id
                     printer_model = config.option<ConfigOptionString>("printer_model", true)->value;
-                    if (!printer_model.empty()) {
-                        std::string printer_model_path = resources_dir() + "/profiles/BBL/machine_full/"+printer_model+".json";
-                        if (boost::filesystem::exists(printer_model_path))
-                        {
-                            std::map<std::string, std::string> key_values;
-
-                            load_key_values_from_json(printer_model_path, key_values);
-                            if (key_values.find("model_id") != key_values.end()) {
-                                printer_model_id = key_values["model_id"];
-                                BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(":%1%, load printer_model_id %2% from current printer model %3%")%__LINE__ %printer_model_id %printer_model;
-                            }
-                        }
-                    }
 
                     load_machine_config = std::move(config);
                 }
@@ -6343,6 +6304,9 @@ int CLI::run(int argc, char **argv)
     global_begin_time = global_current_time;
 
     //opengl related
+#ifdef __linux__
+    CliThumbnailContext thumbnail_context;
+#endif
     std::shared_ptr<Slic3r::GUI::OpenGLManager> p_opengl_mgr = std::make_shared<Slic3r::GUI::OpenGLManager>();
     p_opengl_mgr->set_legacy_framebuffer_enabled(false);
     std::shared_ptr<GLShaderProgram> shader = nullptr;
@@ -6356,7 +6320,7 @@ int CLI::run(int argc, char **argv)
     else
         colors.push_back("#FFFFFFFF");
     std::vector<std::array<float, 4>> colors_out(colors.size());
-    auto init_opengl_and_colors = [&p_opengl_mgr, &colors_out, &glvolume_collection, &shader, &filament_color](Model &model, std::vector<std::string>& f_colors) -> bool {
+    auto init_opengl_and_colors = [&](Model &model, std::vector<std::string>& f_colors) -> bool {
         unsigned char rgb_color[4] = {};
         for (const std::string& color : f_colors) {
             Slic3r::GUI::BitmapCache::parse_color4(color, rgb_color);
@@ -6364,47 +6328,52 @@ int CLI::run(int argc, char **argv)
             colors_out[color_idx] = { float(rgb_color[0]) / 255.f, float(rgb_color[1]) / 255.f, float(rgb_color[2]) / 255.f, float(rgb_color[3]) / 255.f };
         }
 
-        int gl_major, gl_minor, gl_verbos;
-        glfwGetVersion(&gl_major, &gl_minor, &gl_verbos);
-        BOOST_LOG_TRIVIAL(info) << boost::format("opengl version %1%.%2%.%3%")%gl_major %gl_minor %gl_verbos;
+#ifdef __linux__
+        if (!thumbnail_context.make_current())
+#endif
+        {
+            int gl_major, gl_minor, gl_verbos;
+            glfwGetVersion(&gl_major, &gl_minor, &gl_verbos);
+            BOOST_LOG_TRIVIAL(info) << boost::format("opengl version %1%.%2%.%3%")%gl_major %gl_minor %gl_verbos;
 
-        glfwSetErrorCallback(glfw_callback);
-        int ret = glfwInit();
-        if (ret == GLFW_FALSE) {
-            int code = glfwGetError(NULL);
-            BOOST_LOG_TRIVIAL(error) << "glfwInit return error, code " <<code<< std::endl;
-            return false;
-        }
-        else {
-            BOOST_LOG_TRIVIAL(info) << "glfwInit Success."<< std::endl;
-            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, gl_major);
-            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, gl_minor);
-            glfwWindowHint(GLFW_RED_BITS, 8);
-            glfwWindowHint(GLFW_GREEN_BITS, 8);
-            glfwWindowHint(GLFW_BLUE_BITS, 8);
-            glfwWindowHint(GLFW_ALPHA_BITS, 8);
-            glfwWindowHint(GLFW_VISIBLE, false);
-            //glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-            //glfwDisable(GLFW_AUTO_POLL_EVENTS);
+            glfwSetErrorCallback(glfw_callback);
+            int ret = glfwInit();
+            if (ret == GLFW_FALSE) {
+                int code = glfwGetError(NULL);
+                BOOST_LOG_TRIVIAL(error) << "glfwInit return error, code " <<code<< std::endl;
+                return false;
+            }
+            else {
+                BOOST_LOG_TRIVIAL(info) << "glfwInit Success."<< std::endl;
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, gl_major);
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, gl_minor);
+                glfwWindowHint(GLFW_RED_BITS, 8);
+                glfwWindowHint(GLFW_GREEN_BITS, 8);
+                glfwWindowHint(GLFW_BLUE_BITS, 8);
+                glfwWindowHint(GLFW_ALPHA_BITS, 8);
+                glfwWindowHint(GLFW_VISIBLE, false);
+                //glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+                //glfwDisable(GLFW_AUTO_POLL_EVENTS);
 #ifdef __WXMAC__
-            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+                glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+                glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #else
-            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
+                glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
 #endif
 
 #ifdef __linux__
-            glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_OSMESA_CONTEXT_API);
+                glfwWindowHint(GLFW_CONTEXT_CREATION_API, GLFW_OSMESA_CONTEXT_API);
 #endif
 
-            GLFWwindow* window = glfwCreateWindow(640, 480, "base_window", NULL, NULL);
-            if (window == NULL)
-            {
-                BOOST_LOG_TRIVIAL(error) << "Failed to create GLFW window" << std::endl;
-                return false;
+                GLFWwindow* window = glfwCreateWindow(640, 480, "base_window", NULL, NULL);
+                if (window == NULL)
+                {
+                    BOOST_LOG_TRIVIAL(error) << "Failed to create GLFW window" << std::endl;
+                    return false;
+                }
+                else
+                    glfwMakeContextCurrent(window);
             }
-            else
-                glfwMakeContextCurrent(window);
         }
 
         bool gl_valid = p_opengl_mgr->init_gl(false);
@@ -7714,6 +7683,26 @@ int CLI::run(int argc, char **argv)
         // get type and color for platedata
         //auto* filament_types = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_type"));
         //const ConfigOptionStrings* filament_color = dynamic_cast<const ConfigOptionStrings *>(m_print_config.option("filament_colour"));
+        std::string printer_model_id;
+        const auto *effective_model = m_print_config.option<ConfigOptionString>("printer_model");
+        if (effective_model && !effective_model->value.empty() && effective_model->value.find_first_of("/\\") == std::string::npos) {
+            const auto profiles = boost::filesystem::path(resources_dir()) / "profiles" / "BBL";
+            // The desktop vendor catalog uses machine_model entries under machine.
+            // Some CLI distributions also ship a flattened machine_full catalog.
+            for (const char *folder : {"machine", "machine_full"}) {
+                const auto path = profiles / folder / (effective_model->value + ".json");
+                if (!boost::filesystem::is_regular_file(path))
+                    continue;
+                std::map<std::string, std::string> fields;
+                load_key_values_from_json(path.string(), fields);
+                const auto id = fields.find(BBL_JSON_KEY_MODEL_ID);
+                if (id != fields.end() && !id->second.empty()) {
+                    printer_model_id = id->second;
+                    break;
+                }
+            }
+        }
+
         auto* filament_id = dynamic_cast<const ConfigOptionStrings*>(m_print_config.option("filament_ids"));
         const ConfigOptionFloatsNullable* nozzle_diameter_option = dynamic_cast<const ConfigOptionFloatsNullable *>(m_print_config.option("nozzle_diameter"));
         std::string nozzle_diameter_str;
@@ -8323,6 +8312,18 @@ int CLI::run(int argc, char **argv)
             cli_status_callback(slicing_status);
         }
 #endif
+
+        for (const PlateData *plate : plate_data_list) {
+            const int plate_number = plate->plate_index + 1;
+            if (plate->is_sliced_valid && (sliced_plate == 0 || sliced_plate == plate_number) &&
+                (size_t(plate->plate_index) >= thumbnails.size() || !thumbnails[plate->plate_index]->is_valid())) {
+                const std::string message = "Could not render the print thumbnail for plate " + std::to_string(plate_number);
+                BOOST_LOG_TRIVIAL(error) << message;
+                release_PlateData_list(plate_data_list);
+                record_exit_reson(outfile_dir, CLI_EXPORT_3MF_ERROR, plate_number, message, sliced_info);
+                flush_and_exit(CLI_EXPORT_3MF_ERROR);
+            }
+        }
 
         BOOST_LOG_TRIVIAL(info) << "will export 3mf to " << export_3mf_file << std::endl;
         if (!makerlab_name.empty()) {

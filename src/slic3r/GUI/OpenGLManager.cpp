@@ -9,6 +9,9 @@
 #include "slic3r/GUI/GLTexture.hpp"
 
 #include <GL/glew.h>
+#ifdef __linux__
+#include <EGL/egl.h>
+#endif
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
@@ -360,6 +363,12 @@ bool OpenGLManager::init_gl(bool popup_error)
     if (!m_gl_initialized) {
         glewExperimental = GL_TRUE;
         GLenum result = glewInit();
+#ifdef __linux__
+        // GLEW initializes OpenGL before its optional GLX extensions. A current
+        // EGL context has no GLX display by design.
+        if (result == GLEW_ERROR_NO_GLX_DISPLAY && eglGetCurrentContext() != EGL_NO_CONTEXT)
+            result = GLEW_OK;
+#endif
         if (result != GLEW_OK) {
             BOOST_LOG_TRIVIAL(error) << "Unable to init glew library";
             return false;
